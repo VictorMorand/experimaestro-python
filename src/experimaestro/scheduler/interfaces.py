@@ -1223,6 +1223,15 @@ class BaseJob:
                     self.set_state(JobState.RUNNING, loading=True)
             except Exception:
                 pass
+        else:
+            # If status.json says it's finished but marker files and PID files are missing,
+            # the job directory is likely corrupted/purged. Override to WAITING.
+            if self.state.finished():
+                logger.warning(
+                    "Job %s marked as %s in status.json but marker files are missing. Resetting to WAITING.",
+                    self.identifier, self.state
+                )
+                self.set_state(JobState.WAITING, loading=True)
 
     def _load_from_status_dict(self, status_dict: Dict[str, Any]) -> None:
         """Load fields from status.json dictionary
