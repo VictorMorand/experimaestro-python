@@ -398,6 +398,9 @@ class JobFailureStatus(enum.Enum):
     #: Job rejected due to time limit (e.g., requested time exceeds partition max)
     REJECTED_TIMELIMIT = 5
 
+    #: Job output marker missing (probably purged by cluster)
+    MISSING_OUTPUTS = 7
+
     #: Job rejected for other reasons (e.g., invalid partition, resource constraints)
     REJECTED_OTHER = 6
 
@@ -1211,7 +1214,8 @@ class BaseJob:
 
         # Check PID file for running state using launcher-independent
         # Process abstraction (handles local, SSH, SLURM, etc.)
-        elif self.pidfile.exists():
+        # ONLY check if the job is not already finished, to avoid zombie pidfiles
+        elif self.pidfile.exists() and not self.state.finished():
             try:
                 from experimaestro.connectors import Process
                 from experimaestro.connectors.local import LocalConnector
@@ -1223,6 +1227,15 @@ class BaseJob:
                     self.set_state(JobState.RUNNING, loading=True)
             except Exception:
                 pass
+        else:
+            # If status.json says it's finished but marker files and PID files are missing,
+            # the job directory is likely corrupted/purged. Override to ERROR.
+            if self.state.finished():
+                logger.warning(
+                    "Job %s marked as %s in status.json but marker files are missing. Resetting to ERROR.",
+                    self.identifier, self.state
+                )
+                self.set_state(JobStateError(JobFailureStatus.MISSING_OUTPUTS), loading=True)
 
     def _load_from_status_dict(self, status_dict: Dict[str, Any]) -> None:
         """Load fields from status.json dictionary

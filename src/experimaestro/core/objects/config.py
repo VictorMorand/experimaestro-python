@@ -971,13 +971,14 @@ class ConfigInformation:
 
             color = "white"
             if self.job.workspace is not None:
-                if self.job.donepath.is_file():
-                    color = "light_green"
-                    cprint(f"[done] {s}", color, file=sys.stderr)
-                elif self.job.failedpath.is_file():
+                self.job.load_from_disk()
+                if self.job.state.is_error():
                     color = "light_red"
                     cprint(f"[failed] {s}", color, file=sys.stderr)
-                elif self.job.pidpath.is_file():
+                elif self.job.state.finished():
+                    color = "light_green"
+                    cprint(f"[done] {s}", color, file=sys.stderr)
+                elif self.job.state.running():
                     color = "blue"
                     cprint(f"[running] {s}", color, file=sys.stderr)
                 else:
