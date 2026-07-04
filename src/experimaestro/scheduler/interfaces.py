@@ -1211,7 +1211,8 @@ class BaseJob:
 
         # Check PID file for running state using launcher-independent
         # Process abstraction (handles local, SSH, SLURM, etc.)
-        elif self.pidfile.exists():
+        # ONLY check if the job is not already finished, to avoid zombie pidfiles
+        elif self.pidfile.exists() and not self.state.finished():
             try:
                 from experimaestro.connectors import Process
                 from experimaestro.connectors.local import LocalConnector
