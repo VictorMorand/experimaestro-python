@@ -16,7 +16,7 @@ from importlib.metadata import entry_points
 import experimaestro
 from experimaestro.experiments.cli import experiments_cli
 import experimaestro.launcherfinder.registry as launcher_registry
-from experimaestro.settings import ServerSettings, find_workspace
+from experimaestro.settings import get_settings, find_workspace
 
 # --- Command line main options
 # Only configure logging if not running under pytest (pytest has its own config)
@@ -490,7 +490,7 @@ def _run_monitor_ui(
     state_provider,
     workdir: Path,
     console: bool,
-    port: int,
+    port: int | None,
     title: str = "",
     events_viewer: bool = False,
     events_format: str = "text",
@@ -530,19 +530,23 @@ def _run_monitor_ui(
             # Use React web server
             from experimaestro.webui import WebUIServer
 
+            settings = get_settings().server
+            if port is not None:
+                settings.port = port
+            elif settings.port is None:
+                settings.port = 12345
+
             if title:
                 cprint(
-                    f"Starting experiment monitor for {title} on http://localhost:{port}",
+                    f"Starting experiment monitor for {title} on http://localhost:{settings.port}",
                     "green",
                 )
             else:
                 cprint(
-                    f"Starting experiment monitor on http://localhost:{port}", "green"
+                    f"Starting experiment monitor on http://localhost:{settings.port}", "green"
                 )
             cprint("Press Ctrl+C to stop", "yellow")
 
-            settings = ServerSettings()
-            settings.port = port
             server = WebUIServer.instance(settings, state_provider=state_provider)
             server.start()
 
@@ -578,7 +582,7 @@ def _run_monitor_ui(
     help="Hide progress events in events viewer (reduces noise)",
 )
 @click.option(
-    "--port", type=int, default=12345, help="Port for web server (default: 12345)"
+    "--port", type=int, default=None, help="Port for web server (default: 12345 or from settings.yaml)"
 )
 @click.option(
     "--watcher",
@@ -605,7 +609,7 @@ def monitor(
     events_viewer: bool,
     events_format: str,
     no_progress: bool,
-    port: int,
+    port: int | None,
     watcher: str,
     polling_interval: float,
     sync: bool,
