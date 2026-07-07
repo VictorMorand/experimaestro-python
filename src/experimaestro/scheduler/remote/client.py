@@ -547,7 +547,7 @@ class SSHStateProviderClient(OfflineStateProvider):
             )
             cmd.append(full_remote_cmd)
         else:
-            cmd.extend(remote_cmd_parts)
+            cmd.append(shlex.join(remote_cmd_parts))
 
         logger.info("Connecting to %s, workspace: %s", self.host, self.remote_workspace)
         logger.debug("SSH command: %s", shlex.join(cmd))

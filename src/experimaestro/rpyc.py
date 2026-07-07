@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 from subprocess import Popen, PIPE, run
 import time
+import shlex
 from rpyc.utils.server import OneShotServer
 import rpyc
 import threading
@@ -49,16 +50,15 @@ class client:
 
         # Start server
         command = self.ssh(f"-L{local_unix_path}:{remote_unix_path}")
-        command.extend(
-            [
-                self.pythonpath,
-                "-m",
-                "experimaestro",
-                "rpyc-server",
-                "--clean",
-                remote_unix_path,
-            ]
-        )
+        remote_cmd = [
+            self.pythonpath,
+            "-m",
+            "experimaestro",
+            "rpyc-server",
+            "--clean",
+            remote_unix_path,
+        ]
+        command.append(shlex.join(remote_cmd))
 
         logger.debug("Runnning %s", command)
         process = Popen(command, stdout=PIPE)
