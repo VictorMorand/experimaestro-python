@@ -87,6 +87,18 @@ def test_findlauncher_parse():
     assert r.cpu.cores == 4
 
 
+def test_findlauncher_parse_memory_requires_unit():
+    # A memory size without a unit would silently mean bytes: reject it
+    with pytest.raises(ValueError, match="no unit"):
+        parse("""duration=1h & cuda(mem=32) * 1""")
+
+    with pytest.raises(ValueError, match="no unit"):
+        parse("""cpu(mem=400, cores=4)""")
+
+    with pytest.raises(ValueError, match="no unit"):
+        cuda_gpu(mem="32")
+
+
 def split_set(s: str, sep=","):
     return set(s.split(sep))
 

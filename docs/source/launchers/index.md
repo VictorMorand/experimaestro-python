@@ -140,6 +140,14 @@ The launcher finder supports multiple accelerator (GPU) types:
 - **MPS** (`mps()`): Apple Silicon GPUs with unified memory (shared with CPU). Use for macOS Metal support.
 - **Generic** (`gpu()`): Matches any accelerator type. Use for cross-platform compatibility.
 
+```{tip}
+If your code runs on any accelerator (e.g., PyTorch code that works on both
+CUDA and MPS backends), prefer the generic `gpu(...)` over `cuda(...)`: the
+same requirement will then match an NVIDIA GPU on a Linux cluster and an
+Apple Silicon GPU on a laptop. Reserve `cuda(...)` for code that genuinely
+requires CUDA (e.g., custom CUDA kernels or CUDA-only libraries).
+```
+
 ```{note}
 MPS uses unified memory - the GPU shares RAM with the CPU. When matching MPS requirements,
 the combined CPU + GPU memory request must not exceed the total system memory.
@@ -158,6 +166,11 @@ the combined CPU + GPU memory request must not exceed the total system memory.
 - `gpu(mem=<size>) * <N>`: Generic GPU requirements (matches any accelerator)
 - Memory sizes: `<N>G`, `<N>GiB`, `<N>M`, `<N>MiB`
 
+```{note}
+Memory sizes require an explicit unit: `cuda(mem=32)` is rejected with a
+`ValueError` (use `cuda(mem=32G)`).
+```
+
 **Examples:**
 
 ```python
@@ -166,11 +179,11 @@ from experimaestro.launcherfinder.parser import parse
 # Request 8 NVIDIA GPUs with 32GB each
 req = parse("duration=40h & cpu(mem=700GiB) & cuda(mem=32GiB) * 8")
 
-# Cross-platform: CUDA on Linux/Windows OR MPS on macOS
-req = parse("duration=4h & cuda(mem=8GiB) | duration=4h & mps(mem=8GiB)")
-
-# Generic GPU requirement (matches any accelerator)
+# Cross-platform code: generic GPU requirement (matches any accelerator)
 req = parse("duration=2h & gpu(mem=4GiB)")
+
+# Equivalent explicit alternative: CUDA on Linux/Windows OR MPS on macOS
+req = parse("duration=4h & cuda(mem=8GiB) | duration=4h & mps(mem=8GiB)")
 ```
 
 Requirements can be manipulated:
@@ -250,3 +263,68 @@ from experimaestro.launcherfinder import find_launcher
 find_launcher("""duration=4 days & cuda(mem=4G) * 2 & cpu(mem=400M, cores=4)""", tags=["slurm"])
 ```
 will search for a launcher that has the tag `slurm` (see example below).
+
+## Debugging the launcher file
+
+You can query the launcher finder directly — without running an experiment — to
+check which launcher a given requirement resolves to.
+
+### From the command line
+
+The `find-launchers` command loads `launchers.py` from the configuration
+directory (`~/.config/experimaestro` by default, or the directory given with
+`--config`) and prints the launcher returned for a requirement specification:
+
+```bash
+experimaestro find-launchers 'duration=1h & cuda(mem=32G) * 1 & cpu(cores=8)'
+
+# With an explicit configuration directory
+experimaestro find-launchers --config /path/to/config-dir 'duration=1h & cuda(mem=32G) * 1'
+```
+
+### From Python
+
+The same query can be run from a REPL, which is convenient for inspecting
+intermediate objects:
+
+```python
+from pathlib import Path
+from experimaestro.launcherfinder import LauncherRegistry, find_launcher
+
+# Optional: use a non-default configuration directory
+LauncherRegistry.set_config_dir(Path("/path/to/config-dir"))
+
+launcher = find_launcher("duration=1h & cuda(mem=32G) * 1 & cpu(cores=8)")
+print(launcher)
+```
+
+`find_launcher` raises a `LauncherNotFoundError` when no launcher matches; the
+lower-level `LauncherRegistry.instance().find(...)` returns `None` instead.
+
+### Checking how a specification is parsed
+
+If the returned launcher is not the one you expect, first check that the
+specification string is parsed the way you intend:
+
+```python
+from experimaestro.launcherfinder.parser import parse
+
+req = parse("duration=1h & cuda(mem=32G) * 1 & cpu(cores=8)")
+for alternative in req.requirements:
+    print(alternative)
+```
+
+Note that memory sizes require an explicit unit: `cuda(mem=32)` raises a
+`ValueError` instead of being silently interpreted as 32 bytes. Use
+`cuda(mem=32G)` instead.
+
+### Tracing the matching process
+
+Since `launchers.py` is plain Python, you can add `logging.debug` calls in your
+`find_launcher` function (e.g., to print every matching host specification and
+its score) and enable debug logging when querying:
+
+```python
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```

@@ -138,11 +138,23 @@ def parse(expr: str):
     - ``gpu(mem=<size>) * <N>``: Generic GPU requirements (matches any accelerator)
     - Memory sizes: ``<N>G``, ``<N>GiB``, ``<N>M``, ``<N>MiB``
 
+    .. note::
+
+        Memory sizes require an explicit unit: ``cuda(mem=32)`` is rejected
+        with a :class:`ValueError` (use ``cuda(mem=32G)``).
+
     **Accelerator types:**
 
     - ``cuda``: NVIDIA CUDA GPUs only (dedicated memory)
     - ``mps``: Apple Silicon MPS only (unified memory with CPU)
     - ``gpu``: Any accelerator type (cross-platform)
+
+    .. tip::
+
+        If your code runs on any accelerator (e.g., PyTorch code that works
+        on both CUDA and MPS backends), prefer the generic ``gpu(...)`` over
+        ``cuda(...)`` so the same requirement matches on any platform.
+        Reserve ``cuda(...)`` for code that genuinely requires CUDA.
 
     :param expr: The requirement specification string
     :return: A :class:`~experimaestro.launcherfinder.specs.HostRequirement` object

@@ -260,7 +260,12 @@ def check_documentation(objects, package, skip):
         sys.exit(1)
 
 
-@click.option("--config", type=Path, help="Show size of each folder")
+@click.option(
+    "--config",
+    type=Path,
+    help="Configuration directory containing launchers.py"
+    " (defaults to ~/.config/experimaestro)",
+)
 @click.argument("spec", type=str)
 @cli.command()
 def find_launchers(config: Optional[Path], spec: str):

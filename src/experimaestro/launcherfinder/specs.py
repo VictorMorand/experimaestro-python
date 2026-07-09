@@ -2,12 +2,29 @@ from abc import ABC, abstractmethod
 from enum import Enum
 import logging
 import math
+import re
 from attr import Factory
 from attrs import define
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from typing import List, Optional, Union
 from humanfriendly import parse_size, format_size, parse_timespan
+
+
+def parse_memory(mem: str) -> int:
+    """Parse a memory size string into bytes, requiring an explicit unit.
+
+    A bare number would be interpreted as bytes by :func:`humanfriendly.parse_size`,
+    which is never what a host requirement means — reject it instead.
+    """
+    if re.fullmatch(r"\s*\d+(\.\d+)?\s*", mem):
+        raise ValueError(
+            f"Memory size {mem!r} has no unit (it would be interpreted as"
+            f" {mem.strip()} bytes); use an explicit unit, e.g. '{mem.strip()}G'"
+            f" or '{mem.strip()}GiB'"
+        )
+    return parse_size(mem)
+
 
 # --- Host specification part
 
@@ -394,7 +411,7 @@ class HostSimpleRequirement(HostRequirement):
 def cpu(*, mem: Optional[str] = None, cores: int = 1):
     """CPU requirement"""
     r = HostSimpleRequirement()
-    r.cpu = CPUSpecification(parse_size(mem) if mem else 0, cores)
+    r.cpu = CPUSpecification(parse_memory(mem) if mem else 0, cores)
     return r
 
 
@@ -404,7 +421,7 @@ def cuda_gpu(*, mem: Optional[str] = None):
     Use this when you specifically need NVIDIA CUDA support.
     Will not match MPS or other accelerator types.
     """
-    _mem = parse_size(mem) if mem else 0
+    _mem = parse_memory(mem) if mem else 0
     r = HostSimpleRequirement()
     r.accelerators.append(CudaSpecification(_mem))
     return r
@@ -417,7 +434,7 @@ def mps_gpu(*, mem: Optional[str] = None):
     Use this when you specifically need Apple Metal support.
     Will not match CUDA or other accelerator types.
     """
-    _mem = parse_size(mem) if mem else 0
+    _mem = parse_memory(mem) if mem else 0
     r = HostSimpleRequirement()
     r.accelerators.append(MPSSpecification(_mem))
     return r
@@ -429,7 +446,7 @@ def gpu(*, mem: Optional[str] = None):
     Matches any accelerator type (CUDA, MPS, ROCm, etc.) that satisfies
     the memory requirement. Use this for cross-platform compatibility.
     """
-    _mem = parse_size(mem) if mem else 0
+    _mem = parse_memory(mem) if mem else 0
     r = HostSimpleRequirement()
     r.accelerators.append(AcceleratorSpecification(_mem))
     return r
