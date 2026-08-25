@@ -986,38 +986,51 @@ class ConfigInformation:
                 cprint(f"[prepare: nothing to do] {s}", "white", file=sys.stderr)
             print(file=sys.stderr)  # noqa: T201
         else:
-            # Show a warning
-            if run_mode == RunMode.GENERATE_ONLY:
-                experiment.CURRENT.prepare(self.job)
+            self._simulate_submit(run_mode, launcher)
 
-            # Check if job is done
-            tags = ", ".join(f"{k}={v}" for k, v in self.job.config.tags().items())
-            s = f"""Simulating {self.job.relpath} {f"({tags})" if tags else ""}"""
+    def _simulate_submit(self, run_mode, launcher):
+        from experimaestro.scheduler import experiment
+        from experimaestro.scheduler.workspace import RunMode
 
-            color = "white"
-            if self.job.workspace is not None:
-                self.job.load_from_disk()
-                if self.job.state.is_error():
-                    color = "light_red"
-                    cprint(f"[failed] {s}", color, file=sys.stderr)
-                elif self.job.state.finished():
-                    color = "light_green"
-                    cprint(f"[done] {s}", color, file=sys.stderr)
-                elif self.job.state.running():
-                    color = "blue"
-                    cprint(f"[running] {s}", color, file=sys.stderr)
-                else:
-                    color = "light_blue"
-                    cprint(f"[not run] {s}", color, file=sys.stderr)
+        # Show a warning
+        if run_mode == RunMode.GENERATE_ONLY:
+            experiment.CURRENT.prepare(self.job)
 
-                if launcher:
-                    cprint(f"   [Launcher] {launcher}", color, file=sys.stderr)
+        # Check if job is done
+        tags = ", ".join(f"{k}={v}" for k, v in self.job.config.tags().items())
+        s = f"""Simulating {self.job.relpath} {f"({tags})" if tags else ""}"""
 
-                if not self.job.dependencies:
-                    cprint("   [No dependencies]", color, file=sys.stderr)
+        color = "white"
+        if self.job.workspace is not None:
+            self.job.load_from_disk()
+            if self.job.state.is_error():
+                color = "light_red"
+                cprint(f"[failed] {s}", color, file=sys.stderr)
+            elif self.job.state.finished():
+                color = "light_green"
+                cprint(f"[done] {s}", color, file=sys.stderr)
+            elif self.job.state.running():
+                color = "blue"
+                cprint(f"[running] {s}", color, file=sys.stderr)
+            elif folder_ws_name := self.job.find_done_in_folders():
+                color = "light_green"
+                cprint(
+                    f"[done](will copy from {folder_ws_name}) {s}",
+                    color,
+                    file=sys.stderr,
+                )
+            else:
+                color = "light_blue"
+                cprint(f"[not run] {s}", color, file=sys.stderr)
 
-                for dep in self.job.dependencies:
-                    cprint(f"   [Dependency] {dep}", color, file=sys.stderr)
+            if launcher:
+                cprint(f"   [Launcher] {launcher}", color, file=sys.stderr)
+
+            if not self.job.dependencies:
+                cprint("   [No dependencies]", color, file=sys.stderr)
+
+            for dep in self.job.dependencies:
+                cprint(f"   [Dependency] {dep}", color, file=sys.stderr)
 
                 print(file=sys.stderr)  # noqa: T201
 
