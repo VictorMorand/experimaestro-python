@@ -1081,9 +1081,28 @@ class Scheduler(StateProvider, threading.Thread):
         if job.state.finished() and not job.scheduler_state.finished():
             job.set_scheduler_state(job.state)
 
+        # Output-validity hook, for jobs whose real output lives outside their
+        # directory: there the marker files are only a cache of the answer.
+        # Evaluated lazily and at most once, so a transient job nobody needs
+        # costs nothing at all.
+        _validity: list = []
+
+        def output_valid() -> Optional[bool]:
+            if not _validity:
+                try:
+                    _validity.append(job.is_output_valid())
+                except Exception:
+                    logger.exception("Error while checking the output of job %s", job)
+                    _validity.append(None)
+            return _validity[0]
+
         # Check if job is already done (e.g., replaying a completed experiment)
         if job.state == JobState.DONE:
-            return
+            if output_valid() is not False:
+                return
+            # Stale marker: fall through, but let the transient gate below
+            # decide whether the job actually has to be re-run.
+            job.clear_done_marker()
 
         # Check if job failed with exhausted retries (scheduler knows the lifecycle)
         if (
@@ -1122,6 +1141,11 @@ class Scheduler(StateProvider, threading.Thread):
             if job.transient.is_transient and not job._needed_transient:
                 logger.debug("Job is transient and not needed, discarding for now")
                 job.set_scheduler_state(JobState.TRANSIENT)
+            elif output_valid() is True:
+                # The output is already there (e.g. produced outside of this
+                # workspace): adopt it rather than doing the work again.
+                job.mark_done()
+                return
             else:
                 # Job needs to run, set in WAITING mode
                 job.set_scheduler_state(JobState.WAITING)

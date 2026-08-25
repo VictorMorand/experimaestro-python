@@ -309,6 +309,12 @@ class ConfigInformation:
         self.task: Optional["Config"] = None
         """The task this configuration depends upon (or None)"""
 
+        self._prepare_task: Optional["Config"] = None
+        """For a ``Prepare``, the ``PrepareTask`` submitted to prepare it
+
+        Kept apart from ``task`` on purpose: ``task`` feeds the identifier.
+        """
+
         # State information
         self.job = None
         self._job_listener: "TaskEventListener" | None = None
@@ -861,16 +867,29 @@ class ConfigInformation:
         from experimaestro.scheduler.transient import TransientMode
         from ..callbacks import TaskEventListener
 
-        # Use default transient mode if not specified
-        if transient is None:
-            transient = TransientMode.NONE
-
         # --- Prepare the object
 
         if self.job:
             raise Exception("task %s was already submitted" % self)
+
         if not self.xpmtype.task:
+            # A Prepare is not a task, but can be run as one through a
+            # PrepareTask wrapper (``transient`` is still None here: the
+            # wrapper has its own default).
+            if isinstance(self.pyobject, Prepare):
+                return self._submit_prepare(
+                    workspace,
+                    launcher,
+                    run_mode=run_mode,
+                    max_retries=max_retries,
+                    transient=transient,
+                    backup=backup,
+                )
             raise ValueError("%s is not a task" % self.xpmtype)
+
+        # Use default transient mode if not specified
+        if transient is None:
+            transient = TransientMode.NONE
 
         # --- Submit the job
 
@@ -909,6 +928,14 @@ class ConfigInformation:
         if launcher:
             launcher.onSubmit(self.job)
 
+        # --- Run mode
+        #
+        # Resolved before the dependency walk: how Prepare configs are handled
+        # depends on it (see below).
+        run_mode = (
+            workspace.run_mode if run_mode is None else run_mode
+        ) or RunMode.NORMAL
+
         # Apply submit hooks
         self.apply_submit_hooks(self.job, launcher)
 
@@ -927,18 +954,16 @@ class ConfigInformation:
             partial_dep = resource.dependency(name)
             self.job.dependencies.add(partial_dep)
 
-        # Discover Prepare configs in params and attach in-memory deps.
-        # Done before the run_mode branch so PREPARE mode also has the list.
+        # Discover the Prepare configs in the params and depend on them: on
+        # their job when they were submitted, in-memory otherwise.
         from experimaestro.scheduler.prepare import PrepareResource
 
-        prepare_configs = _collect_prepares(self.pyobject)
-        prepare_resources = [PrepareResource.for_config(p) for p in prepare_configs]
+        prepare_resources = [
+            PrepareResource.for_config(p) for p in self._prepare_configs(run_mode)
+        ]
         for resource in prepare_resources:
             self.job.dependencies.add(resource.dependency())
 
-        run_mode = (
-            workspace.run_mode if run_mode is None else run_mode
-        ) or RunMode.NORMAL
         if run_mode == RunMode.NORMAL:
             TaskEventListener.connect(experiment.CURRENT)
             other = experiment.CURRENT.submit(self.job)
@@ -1024,6 +1049,88 @@ class ConfigInformation:
             self._taskoutput = self.task = self.pyobject
 
         return self._taskoutput
+
+    def _prepare_configs(self, run_mode) -> List["Prepare"]:
+        """The ``Prepare`` configs this task must depend on."""
+        from experimaestro.scheduler.prepare import PrepareTask
+        from experimaestro.scheduler.workspace import RunMode
+
+        prepare_configs = _collect_prepares(self.pyobject)
+
+        if isinstance(self.pyobject, PrepareTask):
+            # A prepare job must not take a dependency on the very config it
+            # prepares. The exception is PREPARE mode, where nothing is
+            # scheduled and running it in-process is exactly the point.
+            target = self.pyobject.target
+            prepare_configs = [p for p in prepare_configs if p is not target]
+            if run_mode == RunMode.PREPARE:
+                prepare_configs.insert(0, target)
+
+        return prepare_configs
+
+    def _submit_prepare(
+        self,
+        workspace: "Workspace",
+        launcher: "Launcher",
+        *,
+        run_mode=None,
+        max_retries: Optional[int] = None,
+        transient: "TransientMode" = None,
+        backup: Optional[bool] = None,
+    ):
+        """Submit a :class:`Prepare` config, running it as a job.
+
+        The Prepare config itself stays a plain parameter of whatever
+        references it — only the ``PrepareTask`` wrapper is a task, and the
+        wrapper is *not* recorded as producing it (that would make the Prepare
+        part of its own identifier, since it is also its parameter). What the
+        two are linked through is the ``PrepareResource``, which the tasks
+        referencing the Prepare then depend on. Identifiers are therefore
+        unaffected by the choice between preparing in-process and as a job.
+
+        :return: the Prepare config itself.
+        """
+        from experimaestro.scheduler.prepare import PrepareResource, PrepareTask
+        from experimaestro.scheduler.transient import TransientMode
+
+        value_type = self.xpmtype.value_type
+        if value_type.is_prepared is Prepare.is_prepared:
+            raise ValueError(
+                f"{value_type.__qualname__} cannot be submitted as a job: it "
+                "does not override is_prepared(). Without it the job's .done "
+                "marker cannot be trusted, since a Prepare writes outside of "
+                "its job directory. Either implement is_prepared(), or leave "
+                "the preparation in-process by not calling submit()."
+            )
+
+        if self._prepare_task is not None:
+            raise Exception("prepare %s was already submitted" % self)
+
+        # Preparation only runs when something needs it: an experiment whose
+        # tasks are all done must not re-download anything.
+        if transient is None:
+            transient = TransientMode.TRANSIENT
+
+        task = PrepareTask.C(target=self.pyobject)
+        self._prepare_task = task
+
+        # Dependencies declared on the Prepare (tokens, typically) belong to
+        # the job doing the work — the caller has no other handle on it.
+        task.__xpm__.add_dependencies(*self.dependencies)
+        task.__xpm__.submit(
+            workspace,
+            launcher,
+            run_mode=run_mode,
+            max_retries=max_retries,
+            transient=transient,
+            backup=backup,
+        )
+
+        # Keying by identifier makes two identifier-equal Prepare instances
+        # share the one job — ``prepare_dataset("...")`` called twice returns
+        # distinct configs, and submitting one must cover both.
+        PrepareResource.for_config(self.pyobject).job = task.__xpm__.job
+        return self.pyobject
 
     def mark_output(self, config: "Config", *, dynamic: bool = False):
         """Sets a dependency on the job
@@ -2259,6 +2366,20 @@ class Config:
                 )
         return result
 
+    def __xpm_output_valid__(self) -> Optional[bool]:
+        """Whether this job's real output is present, ignoring marker files.
+
+        The ``.done``/``.failed`` markers live in the job directory, which is
+        only the source of truth for a task whose output lives there too. A
+        task writing elsewhere (see :class:`Prepare`) can override this so the
+        scheduler re-runs it when the output vanished, and adopts an existing
+        output that was produced outside of this workspace.
+
+        :return: True (output present), False (output missing), or None — the
+            default — to trust the marker files.
+        """
+        return None
+
     @property
     def xpmconfig(self) -> T:
         """Returns the original configuration for this instance.
@@ -2426,18 +2547,35 @@ class InstanceConfig(Config):
 
 
 class Prepare(Config):
-    """A Config that declares an in-process preparation step.
+    """A Config that declares a preparation step.
 
     Subclasses override ``prepare(self)`` to do the actual work (download a
     dataset, fetch credentials, populate a cache). When a Task references a
-    ``Prepare`` instance in its params, experimaestro auto-attaches an
-    in-memory dependency on it: ``prepare()`` runs once in the driver
-    process before any dependent task starts.
+    ``Prepare`` instance in its params, experimaestro auto-attaches a
+    dependency on it, so the preparation happens before any dependent task
+    starts. There are two ways for it to run.
 
-    Preparation is NOT a job: it has no workdir, no ``.done`` marker, no
-    entry under ``jobs/``. Idempotence is the responsibility of
-    ``prepare()`` itself (typically the underlying tool — e.g. datamaestro's
-    download — is a no-op when the cache is already populated).
+    **In-process (default).** ``prepare()`` runs once in the driver process.
+    Preparation is then not a job: no workdir, no ``.done`` marker, no entry
+    under ``jobs/``. Idempotence is the responsibility of ``prepare()``
+    itself (typically the underlying tool — e.g. datamaestro's download — is
+    a no-op when the cache is already populated).
+
+    **As a job.** Calling :meth:`submit` runs the preparation as a real job,
+    with a launcher, a resource request, logs and retries — the way to keep a
+    heavy preparation off the driver machine::
+
+        dataset = prepare_dataset("irds.msmarco-passage").submit(
+            launcher=preprocessing_launcher
+        )
+
+    Submitting requires overriding :meth:`is_prepared`, since a Prepare
+    writes outside of its job directory and the ``.done`` marker alone would
+    not be trustworthy. The wrapper job is transient by default: it only runs
+    when a task that needs it actually has to run.
+
+    Either way the Prepare config stays a plain parameter of the tasks that
+    reference it, so identifiers do not depend on how it was run.
 
     The ``RunMode.PREPARE`` mode triggers all Prepare instances referenced
     by submitted tasks while skipping the tasks themselves; useful for
@@ -2447,6 +2585,25 @@ class Prepare(Config):
     def prepare(self, *args, **kwargs) -> None:
         """Override to perform the preparation work. Default: no-op."""
         pass
+
+    def is_prepared(self) -> bool:
+        """Whether the preparation already happened.
+
+        This must be answered independently of any job marker file, since the
+        preparation writes outside of the job directory: the marker is only a
+        cache of this answer. It should be cheap (stat-level) and free of
+        side effects.
+
+        Overriding this method is what makes a Prepare eligible to run as a
+        job through :meth:`submit`. It is also consulted on the in-process
+        path, where returning True skips the call to :meth:`prepare`.
+        """
+        raise NotImplementedError(
+            f"{type(self).__qualname__} does not implement is_prepared()"
+        )
+
+    def submit(self, *args, **kwargs):
+        raise AssertionError("This method can only be used during configuration")
 
 
 class LightweightTask(Config):

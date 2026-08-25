@@ -481,6 +481,35 @@ class Job(BaseJob, Resource):
         code inside"""
         return self.jobpath / ("%s.failed" % self.name)
 
+    def is_output_valid(self) -> Optional[bool]:
+        """Whether the job output is present, independently of marker files.
+
+        See :meth:`experimaestro.Config.__xpm_output_valid__`. None — the
+        default — means the marker files are the source of truth.
+        """
+        return self.config.__xpm_output_valid__()
+
+    def clear_done_marker(self) -> None:
+        """Drop a ``.done`` marker that no longer reflects reality."""
+        logger.info(
+            "Job %s is marked done but its output is missing - invalidating",
+            self.identifier[:8],
+        )
+        self.donepath.unlink(missing_ok=True)
+        self.set_state(JobState.UNSCHEDULED)
+        self.set_scheduler_state(JobState.UNSCHEDULED)
+
+    def mark_done(self) -> None:
+        """Mark the job as done without running it, its output being present."""
+        logger.info(
+            "Job %s output is already present - not running it",
+            self.identifier[:8],
+        )
+        self.path.mkdir(parents=True, exist_ok=True)
+        self.donepath.touch()
+        self.set_state(JobState.DONE)
+        self.set_scheduler_state(JobState.DONE)
+
     @property
     def stdout(self) -> Path:
         return self.jobpath / ("%s.out" % self.name)

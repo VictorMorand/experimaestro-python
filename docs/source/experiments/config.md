@@ -1065,13 +1065,16 @@ The instance order is deterministic and based on the traversal order during iden
 
 ## Prepare configurations (data preparation)
 
-A {py:class}`~experimaestro.Prepare` is a `Config` that declares an in-process
+A {py:class}`~experimaestro.Prepare` is a `Config` that declares a
 preparation step — typically downloading a dataset, fetching credentials, or
 populating a local cache — that should run *before* any task that depends on
 it. Library authors return a `Prepare` instance from helper functions like
 `prepare_dataset(...)`; experimaestro discovers them automatically in any
-submitted task's parameters and invokes `prepare()` exactly once per
-identifier, in the driver Python process.
+submitted task's parameters.
+
+By default the preparation runs **in the driver process**, once per
+identifier. A heavy preparation can instead run **as a job** — see
+[Preparing as a job](#preparing-as-a-job) below.
 
 ```python
 from experimaestro import Prepare, Task, Param
@@ -1095,10 +1098,10 @@ Train.C(dataset=DatasetPrep.C(name="hf:foo")).submit()
 
 Key properties:
 
-- **No on-disk footprint.** A `Prepare` is a {py:class}`Resource
+- **No on-disk footprint.** An in-process `Prepare` is a {py:class}`Resource
   <experimaestro.scheduler.dependencies.Resource>`, not a `Job`: there is no
   workdir under `jobs/`, no `.done` marker, no `params.json`. Idempotence is
-  the responsibility of `prepare()` itself.
+  the responsibility of `prepare()` itself — or of `is_prepared()`, see below.
 - **Dedup by identifier.** Two `Prepare` instances with the same parameters
   share a single execution. Many tasks referencing the same Prepare trigger
   at most one `prepare()` call per Python process.
@@ -1120,7 +1123,7 @@ experimaestro run-experiment my_experiment.py
 
 | Run mode      | `workspace/jobs/...`             | Cache populated by `prepare()` |
 |---------------|----------------------------------|--------------------------------|
-| `NORMAL`      | One folder per task (logs, outputs, `.done` / `.failed`) | Yes (prep runs before each task) |
+| `NORMAL`      | One folder per task (logs, outputs, `.done` / `.failed`), plus one per *submitted* Prepare | Yes (prep runs before each task) |
 | `PREPARE`     | **Nothing**                      | Yes (only effect on disk) |
 | `GENERATE_ONLY` | `params.json` per task (no execution) | No |
 | `DRY_RUN`     | Nothing                          | No |
@@ -1133,6 +1136,75 @@ writes nothing for a `Prepare`.
 
 `Prepare.prepare()` runs in the driver process via `asyncio.to_thread`, so
 blocking I/O does not stall the scheduler loop.
+
+### Is it already prepared?
+
+A `Prepare` may implement `is_prepared()`, answering whether the preparation
+already happened. It must answer **independently of experimaestro's own
+bookkeeping** — the preparation writes to a cache directory, not to a job
+directory — and it must be cheap (stat-level) and free of side effects.
+
+```python
+class DatasetPrep(Prepare):
+    name: Param[str]
+
+    def is_prepared(self) -> bool:
+        return cache_path_for(self.name).exists()
+
+    def prepare(self) -> None:
+        actually_fetch_huggingface(self.name)
+```
+
+On the in-process path this is an optimisation: `prepare()` is skipped when
+`is_prepared()` is True. For a preparation run as a job it is *required*, and
+it is what makes the job's `.done` marker trustworthy.
+
+### Preparing as a job
+
+Calling `submit()` on a `Prepare` runs the preparation as a real job: with a
+launcher, a resource request, its own logs under `jobs/`, and retries. This
+is how a preparation too heavy for the driver machine — building a document
+store over millions of documents, say — is moved to a compute node:
+
+```python
+dataset = prepare_dataset("irds.msmarco-passage").submit(
+    launcher=preprocessing_launcher
+)
+
+Train.C(dataset=dataset).submit(launcher=gpu_launcher)
+```
+
+`submit()` takes the same arguments as a task's, returns the `Prepare` itself
+so it can go on being used as a parameter, and requires `is_prepared()` to be
+implemented. Concurrency is controlled the way it is for any other job — a
+token serialises preparations that would otherwise exhaust memory:
+
+```python
+prep_token = xp.token("preprocessing", 1)
+dataset = (
+    prepare_dataset("irds.msmarco-passage")
+    .add_dependencies(prep_token.dependency(1))
+    .submit(launcher=preprocessing_launcher)
+)
+```
+
+Properties worth knowing:
+
+- **Identifiers do not change.** The `Prepare` stays a plain parameter of the
+  tasks referencing it; only the wrapper is a task. Switching a preparation
+  between in-process and job leaves every downstream identifier untouched, so
+  nothing is recomputed.
+- **Transient.** The job only runs when a task that needs it actually has to
+  run. An experiment whose tasks are all done prepares nothing.
+- **`is_prepared()` overrides the marker**, in both directions: a `.done`
+  whose data has since been deleted is invalidated, and data already present
+  without a `.done` is adopted rather than prepared again.
+- **Shared filesystem assumed.** The driver and the compute node must see the
+  same cache directory. A node-local cache would be prepared where no one can
+  see it.
+- **Two identifier-equal instances share one job** — calling
+  `prepare_dataset("...")` twice returns distinct configs, and submitting
+  either covers both.
 
 **See also:** [How do I pre-download datasets or resources before running on an offline cluster?](../faq.md#how-do-i-pre-download-datasets-or-resources-before-running-on-an-offline-cluster) in the FAQ; the [MNIST demo](https://github.com/experimaestro/experimaestro-demo) exercises the end-to-end flow.
 

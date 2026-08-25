@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List
 
 import pytest
 
 from experimaestro import Param, Prepare, RunMode, Task
 from experimaestro.scheduler.jobs import JobDependency
-from experimaestro.scheduler.prepare import PrepareDependency, PrepareResource
+from experimaestro.scheduler.prepare import (
+    PrepareDependency,
+    PrepareResource,
+    PrepareTask,
+)
 from experimaestro.tests.utils import TemporaryExperiment
 
 
@@ -83,6 +88,39 @@ class TaskUsingSlowPrep(Task):
         pass
 
 
+class CheckedPrep(Prepare):
+    """A Prepare that can run as a job: its state is a marker file on disk.
+
+    ``prepare()`` may run in a worker process, so calls are counted through
+    ``log`` rather than through a module-level counter.
+    """
+
+    marker: Param[Path]
+    log: Param[Path]
+
+    def is_prepared(self) -> bool:
+        return self.marker.is_file()
+
+    def prepare(self, *args, **kwargs) -> None:
+        with self.log.open("a") as out:
+            out.write("prepared\n")
+        self.marker.write_text("prepared")
+
+
+class TaskUsingCheckedPrep(Task):
+    prep: Param[CheckedPrep]
+    touch: Param[Path]
+    variant: Param[int]
+    """Distinguishes two tasks that only differ by needing to be run again
+
+    (paths do not take part in identifiers)
+    """
+
+    def execute(self):
+        assert self.prep.marker.is_file(), "Task ran before its Prepare"
+        self.touch.write_text("done")
+
+
 class InnerTask(Task):
     def execute(self):
         pass
@@ -105,6 +143,19 @@ def _prepare_deps(task: Task) -> List[PrepareDependency]:
         for dep in task.__xpm__.job.dependencies
         if isinstance(dep, PrepareDependency)
     ]
+
+
+def _job_deps(task: Task) -> List[JobDependency]:
+    return [
+        dep for dep in task.__xpm__.job.dependencies if isinstance(dep, JobDependency)
+    ]
+
+
+def _prepare_calls(log: Path) -> int:
+    """How many times ``CheckedPrep.prepare()`` ran, across processes."""
+    if not log.is_file():
+        return 0
+    return len([line for line in log.read_text().splitlines() if line])
 
 
 # --- Core tests -------------------------------------------------------------
@@ -240,3 +291,218 @@ def test_no_double_attachment_when_task_also_in_params():
             if isinstance(dep, JobDependency)
         ]
         assert len(job_deps) == 1
+
+
+# --- Prepare as a job -------------------------------------------------------
+
+
+class PreparedFiles:
+    """Paths shared by a Prepare and the assertions about it."""
+
+    def __init__(self, tmp_path: Path):
+        self.data = tmp_path / "data"
+        self.data.mkdir(parents=True, exist_ok=True)
+        self.marker = self.data / "marker"
+        self.log = self.data / "prepare.log"
+        self.workdir = tmp_path / "workdir"
+        self.workdir.mkdir(parents=True, exist_ok=True)
+
+    def config(self) -> CheckedPrep:
+        return CheckedPrep.C(marker=self.marker, log=self.log)
+
+    def touch_path(self, variant: int = 0) -> Path:
+        return self.data / f"task-ran-{variant}"
+
+    @property
+    def calls(self) -> int:
+        return _prepare_calls(self.log)
+
+
+@pytest.fixture
+def files(tmp_path: Path) -> PreparedFiles:
+    return PreparedFiles(tmp_path)
+
+
+def _run(
+    files: PreparedFiles,
+    name: str,
+    *,
+    submit_prepare: bool = True,
+    variant: int = 0,
+):
+    """Run one experiment preparing then using ``files``."""
+    PrepareResource.reset()
+    with TemporaryExperiment(name, workdir=files.workdir):
+        prep = files.config()
+        if submit_prepare:
+            prep = prep.submit()
+        task = TaskUsingCheckedPrep.C(
+            prep=prep, touch=files.touch_path(variant), variant=variant
+        )
+        task.submit()
+        return _prepare_job(prep), task
+
+
+def _prepare_job(prep: CheckedPrep):
+    return PrepareResource.for_config(prep).job
+
+
+def _seed_prepare_done(files: PreparedFiles) -> "Path":
+    """Leave behind the .done of a previous run, without the data it stands for.
+
+    The scheduler is a process-wide singleton whose job registry only resets
+    between tests, so a second experiment in the same test would not go
+    through the disk state at all. Seeding the marker is what a previous
+    *process* would have left.
+    """
+    PrepareResource.reset()
+    with TemporaryExperiment("seed", workdir=files.workdir, run_mode=RunMode.DRY_RUN):
+        prep = files.config()
+        prep.submit()
+        job = _prepare_job(prep)
+
+    job.path.mkdir(parents=True, exist_ok=True)
+    job.donepath.touch()
+    assert not files.marker.exists(), "The seeded state must not include the data"
+    return job.donepath
+
+
+def test_prepare_submit_runs_as_job(files):
+    """A submitted Prepare runs as a job, and its dependent waits for it."""
+    job, task = _run(files, "prepare-as-job")
+
+    assert files.calls == 1
+    assert files.marker.is_file()
+    assert files.touch_path().is_file(), "The dependent task did not run"
+
+    # The dependency is a plain job dependency, not an in-process one
+    assert _prepare_deps(task) == []
+    assert len(_job_deps(task)) == 1
+
+    # ... and the preparation ran in its own job directory
+    assert job.donepath.is_file()
+    assert job.stdout.is_file(), "The preparation did not run as a process"
+
+
+def test_prepare_job_adopts_existing_output(files):
+    """No .done but the output is there: adopt it instead of preparing again."""
+    files.marker.write_text("prepared by someone else")
+
+    job, _ = _run(files, "prepare-adopt")
+
+    assert files.calls == 0, "prepare() ran even though the output was present"
+    assert files.touch_path().is_file(), "The dependent task did not run"
+    assert job.donepath.is_file(), "The existing output was not adopted"
+    assert not job.stdout.exists(), "The preparation ran although it had nothing to do"
+
+
+def test_prepare_job_reruns_when_output_disappears(files):
+    """A .done marker that no longer reflects reality must not be trusted."""
+    _seed_prepare_done(files)
+
+    _run(files, "prepare-stale")
+
+    assert files.calls == 1, "prepare() did not run despite a stale .done marker"
+    assert files.marker.is_file()
+    assert files.touch_path().is_file()
+
+
+def test_prepare_job_skipped_when_nothing_needs_it(files):
+    """Being transient, an unneeded preparation is not redone even if invalid."""
+    donepath = _seed_prepare_done(files)
+
+    PrepareResource.reset()
+    with TemporaryExperiment("prepare-unneeded", workdir=files.workdir):
+        files.config().submit()
+
+    assert files.calls == 0, "prepare() ran although no task needed it"
+    assert not donepath.exists(), "The stale marker should have been invalidated"
+
+
+def test_prepare_job_dedupes_identifier_equal_instances(files):
+    """Submitting one instance covers the identifier-equal ones."""
+    PrepareResource.reset()
+    with TemporaryExperiment("prepare-job-dedup", workdir=files.workdir):
+        files.config().submit()
+
+        # A distinct instance, built the way a second prepare_dataset() call would
+        other = files.config()
+        task = TaskUsingCheckedPrep.C(prep=other, touch=files.touch_path(), variant=0)
+        task.submit()
+
+        assert _prepare_deps(task) == [], "The second instance prepared in-process"
+        assert len(_job_deps(task)) == 1
+
+    assert files.calls == 1
+
+
+@pytest.mark.parametrize("run_mode", [RunMode.DRY_RUN, RunMode.GENERATE_ONLY])
+def test_submitted_prepare_not_run_in_simulation_modes(files, run_mode):
+    """No surprise downloads when the experiment is only being simulated."""
+    PrepareResource.reset()
+    with TemporaryExperiment(
+        "prepare-simulated", workdir=files.workdir, run_mode=run_mode
+    ):
+        prep = files.config().submit()
+        TaskUsingCheckedPrep.C(prep=prep, touch=files.touch_path(), variant=0).submit()
+
+    assert files.calls == 0
+    assert not files.marker.exists()
+
+
+def test_submitted_prepare_runs_in_prepare_mode(files):
+    """PREPARE mode schedules nothing, so a submitted Prepare runs in-process."""
+    PrepareResource.reset()
+    with TemporaryExperiment(
+        "prepare-mode", workdir=files.workdir, run_mode=RunMode.PREPARE
+    ) as xp:
+        prep = files.config().submit()
+        TaskUsingCheckedPrep.C(prep=prep, touch=files.touch_path(), variant=0).submit()
+        jobspath = xp.workspace.jobspath
+
+    assert files.calls == 1, "PREPARE mode did not prepare the submitted config"
+    assert files.marker.is_file()
+    assert not jobspath.exists(), "PREPARE mode must not write under jobs/"
+
+
+def test_prepare_dependencies_go_to_the_job(files):
+    """Dependencies declared on the Prepare (tokens) end up on the job."""
+    PrepareResource.reset()
+    with TemporaryExperiment("prepare-token", workdir=files.workdir) as xp:
+        token = xp.token("prepare-test-token", 1)
+        prep = files.config().add_dependencies(token.dependency(1))
+        prep.submit()
+
+        job = _prepare_job(prep)
+        assert any(dep.origin is token for dep in job.dependencies), (
+            f"The token did not reach the prepare job: {job.dependencies}"
+        )
+
+    assert files.calls == 0, "The transient preparation ran although unneeded"
+
+
+def test_prepare_task_rechecks_on_the_worker(files):
+    """The worker re-checks: another experiment may have won the race."""
+    files.marker.write_text("prepared by the winner of the race")
+
+    task = PrepareTask.C(target=files.config()).instance()
+    task.execute()
+
+    assert files.calls == 0, "prepare() ran although the target was already prepared"
+
+
+def test_prepare_submit_requires_is_prepared():
+    """A Prepare that cannot check itself must not become a job."""
+    with TemporaryExperiment("prepare-no-check", run_mode=RunMode.DRY_RUN):
+        with pytest.raises(ValueError, match="is_prepared"):
+            FakePrep.C(name="uncheckable").submit()
+
+
+def test_prepare_inprocess_honours_is_prepared(files):
+    """The in-process path skips prepare() when the output is already there."""
+    files.marker.write_text("prepared by someone else")
+
+    _run(files, "prepare-inprocess-check", submit_prepare=False)
+
+    assert files.calls == 0
+    assert files.touch_path().is_file()

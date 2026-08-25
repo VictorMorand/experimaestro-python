@@ -44,7 +44,9 @@ uv run experimaestro run-experiment --run-mode prepare my_experiment.py
 ```
 
 This walks every `Prepare` referenced in your submitted tasks' params,
-runs each `prepare()` exactly once in the driver process, and exits.
+runs each `prepare()` exactly once in the driver process, and exits. This
+holds for preparations that were submitted as jobs too: PREPARE mode
+schedules nothing, so they also run in the driver.
 Afterwards the compute nodes can run the experiment without internet
 access:
 
@@ -72,10 +74,15 @@ folder, building a Docker layer cache, etc. Subclass `Prepare`, override
 call:
 
 ```python
+from pathlib import Path
 from experimaestro import Prepare, Param
 
 class HFModelPrep(Prepare):
     model_id: Param[str]
+
+    def is_prepared(self) -> bool:
+        from huggingface_hub import try_to_load_from_cache
+        return try_to_load_from_cache(self.model_id, "config.json") is not None
 
     def prepare(self) -> None:
         from huggingface_hub import snapshot_download
@@ -87,6 +94,26 @@ def prepare_model(model_id: str) -> HFModelPrep:
 
 Any task that takes an `HFModelPrep` in its params will have the download
 triggered automatically before it runs.
+
+### My preparation is too heavy for the login node — can it run on a compute node?
+
+Yes: call `submit()` on the `Prepare` and it runs as a job, with a launcher
+and a resource request of its own.
+
+```python
+dataset = prepare_dataset("irds.msmarco-passage").submit(
+    launcher=preprocessing_launcher
+)
+Train.C(dataset=dataset).submit(launcher=gpu_launcher)
+```
+
+This requires the `Prepare` to implement `is_prepared()`, since the
+preparation writes to a cache directory rather than to its job directory —
+that check, and not the job's `.done` marker, is what decides whether the
+work still has to be done. Downstream identifiers are unaffected, so moving
+a preparation to a job does not invalidate anything you have already
+computed. See
+[Preparing as a job](experiments/config.md#preparing-as-a-job).
 
 ## Post-experiment workflows
 
