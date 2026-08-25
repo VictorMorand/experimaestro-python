@@ -982,8 +982,17 @@ class ConfigInformation:
                     color = "blue"
                     cprint(f"[running] {s}", color, file=sys.stderr)
                 else:
-                    color = "light_blue"
-                    cprint(f"[not run] {s}", color, file=sys.stderr)
+                    folder_ws_name = self.job.find_done_in_folders()
+                    if folder_ws_name:
+                        color = "light_green"
+                        cprint(
+                            f"[done](will copy from {folder_ws_name}) {s}",
+                            color,
+                            file=sys.stderr,
+                        )
+                    else:
+                        color = "light_blue"
+                        cprint(f"[not run] {s}", color, file=sys.stderr)
 
                 if launcher:
                     cprint(f"   [Launcher] {launcher}", color, file=sys.stderr)

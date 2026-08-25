@@ -331,6 +331,30 @@ class Job(BaseJob, Resource):
         if self.scheduler:
             self.scheduler.notify_job_state(self)
 
+    def find_done_in_folders(self) -> Optional[str]:
+        """Check if job has finished in any attached workspace folder.
+
+        Uses shared find_in_folders detection. Returns the workspace/folder
+        display name if found done, else None.
+        """
+        if not self.workspace or not self.workspace.folders:
+            return None
+
+        from experimaestro.scheduler.folders import (
+            find_in_folders,
+            get_folder_workspace_name,
+        )
+        from experimaestro.scheduler.interfaces import JobState
+
+        match = find_in_folders(Path(self.relpath), self.workspace.folders)
+        if match is not None:
+            folder, src = match
+            marker_state = JobState.from_path(src, self.name)
+            if marker_state == JobState.DONE:
+                return get_folder_workspace_name(folder)
+
+        return None
+
     @cached_property
     def python_path(self) -> Iterator[str]:
         """Returns an iterator over python path"""

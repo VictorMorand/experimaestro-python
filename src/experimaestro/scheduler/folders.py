@@ -365,6 +365,40 @@ def wait_for_pending(timeout: Optional[float] = None) -> bool:
     return _WORKER.wait(timeout=timeout)
 
 
+def find_in_folders(
+    rel: Path,
+    folders: list[FolderSettings],
+) -> Optional[tuple[FolderSettings, Path]]:
+    """Look up a relative job path (<task_id>/<hash>) across attached folders.
+
+    Returns the matching (FolderSettings, job_path) tuple for the first
+    folder containing the job directory, or None if not found.
+    """
+    for folder in folders:
+        src = folder.path / "jobs" / rel
+        if src.exists():
+            return folder, src
+    return None
+
+
+def get_folder_workspace_name(folder: FolderSettings) -> str:
+    """Resolve the display workspace name for a FolderSettings instance.
+
+    Returns the registered workspace id if folder.path matches a workspace
+    in settings.workspaces, otherwise falls back to folder.path.name.
+    """
+    try:
+        from experimaestro.settings import get_settings
+
+        folder_resolved = folder.path.expanduser().resolve()
+        for ws in get_settings().workspaces:
+            if Path(ws.path).expanduser().resolve() == folder_resolved:
+                return ws.id
+    except Exception:
+        pass
+    return folder.path.name or str(folder.path)
+
+
 def recover_from_folders(
     rel: Path,
     primary_jobs: Path,
@@ -384,9 +418,10 @@ def recover_from_folders(
         return dest
 
     for folder in folders:
-        src = folder.path / "jobs" / rel
-        if not src.exists():
+        match = find_in_folders(rel, [folder])
+        if match is None:
             continue
+        _, src = match
 
         tmp = dest.parent / f".tmp.{dest.name}"
         dest.parent.mkdir(parents=True, exist_ok=True)

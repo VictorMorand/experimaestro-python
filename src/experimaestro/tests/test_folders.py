@@ -7,13 +7,12 @@ trigger) is exercised by the existing job lifecycle tests by virtue of
 ``Workspace.folders`` defaulting to empty.
 """
 
-from __future__ import annotations
-
 import json
 from pathlib import Path
 
 import pytest
 
+from experimaestro import Param, RunMode, Task
 from experimaestro.locking import create_file_lock
 from experimaestro.scheduler.folders import (
     _archive_job,
@@ -375,3 +374,67 @@ class TestSettingsDeprecation:
         assert len(folders) == 1
         assert folders[0].mode == FolderMode.USE
         assert folders[0].path == other
+
+
+class TestDryRunFolderLookup:
+    """Test folder lookup in dry-run mode."""
+
+    def test_find_in_folders_helper(self, tmp_path: Path):
+        from experimaestro.scheduler.folders import (
+            find_in_folders,
+            get_folder_workspace_name,
+        )
+
+        backup_root = tmp_path / "backup"
+        job_src = backup_root / "jobs" / TASK_ID / JOB_ID
+        job_src.mkdir(parents=True)
+        (job_src / "MyTask.done").write_text("")
+
+        folder = FolderSettings(path=backup_root, mode=FolderMode.USE)
+        rel = Path(TASK_ID) / JOB_ID
+
+        match = find_in_folders(rel, [folder])
+        assert match is not None
+        assert match[0] == folder
+        assert match[1] == job_src
+
+        ws_name = get_folder_workspace_name(folder)
+        assert ws_name == "backup"
+
+    def test_dry_run_displays_will_copy_from_folder(self, tmp_path: Path, capsys):
+        from experimaestro.scheduler.jobs import Job
+        from experimaestro.scheduler.workspace import Workspace
+        from experimaestro.settings import Settings, WorkspaceSettings
+
+        # Create external folder with completed job
+        backup_root = tmp_path / "shared_ws"
+        folder = FolderSettings(path=backup_root, mode=FolderMode.USE)
+
+        class SimpleTask(Task):
+            x: Param[int]
+
+            def execute(self):
+                pass
+
+        task = SimpleTask.C(x=42)
+
+        # Create primary workspace configured with the folder
+        primary_root = tmp_path / "primary"
+        ws_settings = WorkspaceSettings(
+            id="primary",
+            path=primary_root,
+            folders=[folder],
+        )
+        settings = Settings(workspaces=[ws_settings])
+        workspace = Workspace(settings, ws_settings, launcher=None)
+
+        job = Job(task, workspace=workspace)
+        ext_job_dir = backup_root / "jobs" / job.relpath
+        ext_job_dir.mkdir(parents=True)
+        (ext_job_dir / f"{job.name}.done").write_text("")
+
+        with workspace:
+            task.submit(run_mode=RunMode.DRY_RUN)
+
+        captured = capsys.readouterr()
+        assert "[done](will copy from shared_ws)" in captured.err
