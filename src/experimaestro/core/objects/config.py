@@ -988,6 +988,26 @@ class ConfigInformation:
         else:
             self._simulate_submit(run_mode, launcher)
 
+        # Mark this configuration also
+        self.task = self.pyobject
+
+        from experimaestro.scheduler.experiment import experiment as _experiment
+
+        # Look up __submit__ or task_outputs on the value type (original class),
+        # not on the C proxy, to avoid MRO issues where ConfigMixin comes first
+        value_type = type(self.pyobject).__xpmtype__.value_type
+        if hasattr(value_type, "__submit__"):
+            add_action = _experiment.CURRENT.add_action if _experiment.CURRENT else None
+            self._taskoutput = value_type.__submit__(
+                self.pyobject, self.mark_output, add_action
+            )
+        elif hasattr(value_type, "task_outputs"):
+            self._taskoutput = value_type.task_outputs(self.pyobject, self.mark_output)
+        else:
+            self._taskoutput = self.task = self.pyobject
+
+        return self._taskoutput
+
     def _simulate_submit(self, run_mode, launcher):
         from experimaestro.scheduler import experiment
         from experimaestro.scheduler.workspace import RunMode
@@ -1032,27 +1052,7 @@ class ConfigInformation:
             for dep in self.job.dependencies:
                 cprint(f"   [Dependency] {dep}", color, file=sys.stderr)
 
-                print(file=sys.stderr)  # noqa: T201
-
-        # Mark this configuration also
-        self.task = self.pyobject
-
-        from experimaestro.scheduler.experiment import experiment as _experiment
-
-        # Look up __submit__ or task_outputs on the value type (original class),
-        # not on the C proxy, to avoid MRO issues where ConfigMixin comes first
-        value_type = type(self.pyobject).__xpmtype__.value_type
-        if hasattr(value_type, "__submit__"):
-            add_action = _experiment.CURRENT.add_action if _experiment.CURRENT else None
-            self._taskoutput = value_type.__submit__(
-                self.pyobject, self.mark_output, add_action
-            )
-        elif hasattr(value_type, "task_outputs"):
-            self._taskoutput = value_type.task_outputs(self.pyobject, self.mark_output)
-        else:
-            self._taskoutput = self.task = self.pyobject
-
-        return self._taskoutput
+            print(file=sys.stderr)  # noqa: T201
 
     def _prepare_configs(self, run_mode) -> List["Prepare"]:
         """The ``Prepare`` configs this task must depend on."""
