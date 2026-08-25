@@ -446,7 +446,7 @@ class ConfigInformation:
                         v.__xpm__.fuse_concrete_typevars(self.concrete_typevars)
                         self.fuse_concrete_typevars(v.__xpm__.concrete_typevars)
                 elif argument.required:
-                    raise AttributeError("Cannot set required attribute to None")
+                    raise AttributeError(f"Cannot set required attribute '{k}' to None")
                 else:
                     self.values[k] = None
 
