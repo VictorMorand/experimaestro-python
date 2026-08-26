@@ -106,6 +106,35 @@ def test_tags_init_tasks():
     assert result.tags() == {"hello": "world"}
 
 
+def test_tags_stop_tags_init_tasks():
+    """stop_tags(...) can be used on an initialization task (issue #269)"""
+
+    class MyTask(Task):
+        pass
+
+    class InitTask(LightweightTask):
+        pass
+
+    init_task = InitTask.C().tag("hello", "world")
+
+    # Without stop_tags, tags propagate to the task
+    plain = MyTask.C().submit(run_mode=RunMode.DRY_RUN, init_tasks=[init_task])
+    assert plain.tags() == {"hello": "world"}
+
+    # With stop_tags, they do not
+    stopped = MyTask.C().submit(
+        run_mode=RunMode.DRY_RUN, init_tasks=[stop_tags(init_task)]
+    )
+    assert stopped.tags() == {}
+
+    # ... but the identifier is not modified by the wrapper
+    assert stopped.__xpm__.identifier.all == plain.__xpm__.identifier.all
+
+    # Tagging an initialization task makes no sense (no parameter name)
+    with pytest.raises(ValueError):
+        MyTask.C().submit(run_mode=RunMode.DRY_RUN, init_tasks=[tag(InitTask.C())])
+
+
 class TaskDirectoryContext(DirectoryContext):
     def __init__(self, task, path):
         super().__init__(path)

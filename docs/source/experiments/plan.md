@@ -110,6 +110,15 @@ blocked:
 config = MyConfig.C(x=stop_tags(tag(SubConfig.C(lr=tag(0.001)))))
 ```
 
+Initialization tasks also propagate their tags, and can be wrapped the same way:
+
+```python
+task.submit(init_tasks=[stop_tags(init_task)])
+```
+
+An initialization task cannot be tagged with {py:func}`~experimaestro.tag`
+(there is no parameter name to attach the tag to).
+
 ### Paths based on tags
 
 Use {py:func}`~experimaestro.tagspath` to create a unique path where

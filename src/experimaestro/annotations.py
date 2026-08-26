@@ -125,6 +125,10 @@ def stop_tags(value):
 
         config = MyConfig.C(x=stop_tags(tag(SubConfig.C(lr=tag(0.001)))))
 
+    It can also be used on an initialization task::
+
+        task.submit(init_tasks=[stop_tags(init_task)])
+
     :param value: The value to wrap
     :return: A wrapped value that stops tag propagation
     """

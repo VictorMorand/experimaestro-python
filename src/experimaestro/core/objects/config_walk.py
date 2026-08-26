@@ -98,6 +98,10 @@ class ConfigWalk:
         """Whether to recurse into this argument. Override to skip."""
         return True
 
+    def should_recurse_init_task(self, config, init_task) -> bool:
+        """Whether to recurse into this initialization task. Override to skip."""
+        return True
+
     def stub(self, config):
         return config
 
@@ -136,7 +140,10 @@ class ConfigWalk:
             # Deals with init tasks
             if info.init_tasks:
                 with self.map("__init_tasks__"):
-                    self(info.init_tasks)
+                    for ix, init_task in enumerate(info.init_tasks):
+                        if self.should_recurse_init_task(x, init_task):
+                            with self.list(ix):
+                                self(init_task)
 
             # Process task if different
             if (

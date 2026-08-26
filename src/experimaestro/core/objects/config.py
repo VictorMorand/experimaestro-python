@@ -335,6 +335,10 @@ class ConfigInformation:
         # Initialization tasks
         self.init_tasks: List["LightweightTask"] = []
 
+        # Identifiers of the initialization tasks whose tags should not
+        # propagate to this configuration (set through ``stop_tags``)
+        self._stop_tags_init_tasks: Set[int] = set()
+
         # Watched outputs
         self.watched_outputs: List[WatchedOutput] = []
 
@@ -535,6 +539,9 @@ class ConfigInformation:
             def should_recurse_arg(self, config, arg_name: str) -> bool:
                 props = config.__xpm__._args_properties.get(arg_name)
                 return props is None or "stop_tags" not in props
+
+            def should_recurse_init_task(self, config, init_task) -> bool:
+                return id(init_task) not in config.__xpm__._stop_tags_init_tasks
 
             def postprocess(self, stub, config: Config, values):
                 for name, (value, source) in config.__xpm__._tags.items():
@@ -851,6 +858,28 @@ class ConfigInformation:
 
         TaskEventListener.on_completed(self, callback)
 
+    def set_init_tasks(self, init_tasks: List["LightweightTask"]):
+        """Set the initialization tasks, unwrapping :class:`ConfigWrapper`
+
+        ``stop_tags(init_task)`` marks the initialization task so that its tags
+        do not propagate to this configuration.
+        """
+        self.init_tasks = []
+        self._stop_tags_init_tasks = set()
+
+        for init_task in init_tasks:
+            if isinstance(init_task, ConfigWrapper):
+                if init_task.tagged:
+                    raise ValueError(
+                        "An initialization task cannot be tagged with tag(...)"
+                        " since it is not associated with a parameter name"
+                    )
+                if init_task.stop_tags:
+                    self._stop_tags_init_tasks.add(id(init_task.value))
+                init_task = init_task.value
+
+            self.init_tasks.append(init_task)
+
     def submit(
         self,
         workspace: "Workspace",
@@ -894,7 +923,7 @@ class ConfigInformation:
         # --- Submit the job
 
         # Sets the init tasks
-        self.init_tasks = init_tasks
+        self.set_init_tasks(init_tasks)
 
         # Creates a new job
         self.job = self.xpmtype.task(
