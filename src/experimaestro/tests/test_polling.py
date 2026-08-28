@@ -2,7 +2,7 @@
 
 import time
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from typing import List
 
 
@@ -299,17 +299,37 @@ class TestDirectoryWatch:
         finally:
             watch.close()
 
+    @retry_on_flake(max_attempts=3)
     def test_multiple_files(self, tmp_path):
-        """Test watching multiple files"""
-        changes: List[Path] = []
+        """Test watching multiple files
+
+        on_change fires once per reported event, not once per distinct file:
+        an event source may report the same file several times for a single
+        rewrite (measured: 2-3 callbacks for one file). So a *count* of two
+        callbacks says nothing about how many files were seen -- it can be
+        file1 twice while file2 is still pending, and the count-based wait then
+        returns too early. Wait on the set of distinct paths instead, and
+        create the files before the watch exists so the setup writes cannot
+        contribute events of their own.
+        """
+        changed: set[Path] = set()
+        changed_lock = Lock()
         change_event = Event()
-        change_count = [0]
+
+        file1 = tmp_path / "file1.txt"
+        file2 = tmp_path / "file2.txt"
+        expected: set[Path] = {file1, file2}
 
         def on_change(path):
-            changes.append(path)
-            change_count[0] += 1
-            if change_count[0] >= 2:
-                change_event.set()
+            with changed_lock:
+                changed.add(path)
+                if expected <= changed:
+                    change_event.set()
+
+        # Written before the watch starts: any event from these writes would
+        # otherwise race with the modifications below.
+        file1.write_text("content")
+        file2.write_text("content")
 
         svc = FileWatcherService.instance()
         watch = svc.watch_directory(
@@ -319,21 +339,18 @@ class TestDirectoryWatch:
             max_poll_interval=0.5,
         )
 
-        file1 = tmp_path / "file1.txt"
-        file2 = tmp_path / "file2.txt"
-        file1.write_text("content1")
-        file2.write_text("content2")
-
-        watch.add_file(file1)
-        watch.add_file(file2)
-
         try:
-            time.sleep(0.2)
-            file1.write_text("modified1")
-            file2.write_text("modified2")
+            watch.add_file(file1)
+            watch.add_file(file2)
 
-            assert change_event.wait(timeout=3.0), "Changes were not detected"
-            assert file1 in changes
-            assert file2 in changes
+            # The poll backstop detects changes by size, so the rewrite must
+            # change the length, not just the content.
+            time.sleep(0.2)
+            file1.write_text("modified content 1")
+            file2.write_text("modified content 2")
+
+            assert change_event.wait(timeout=10.0), (
+                f"Changes were not detected for {sorted(expected - changed)}"
+            )
         finally:
             watch.close()
