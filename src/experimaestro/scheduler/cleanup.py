@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import socket
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -236,6 +238,10 @@ def _check_orphaned_experiment_events(
                 f"Experiment {experiment_id} is locked (running), skipping cleanup"
             )
             continue
+        except (PermissionError, OSError) as e:
+            # Lock file owned by another user in a shared workspace
+            _log_permission_error(lock_path, e)
+            continue
 
         try:
             if events_count is not None and auto_fix:
@@ -310,6 +316,113 @@ def _consolidate_experiment_events_with_count(
         logger.warning(f"Failed to consolidate experiment {experiment_id}: {e}")
 
 
+#: Whether the shared-workspace hint has already been given
+_permission_hint_given = False
+
+
+def _log_permission_error(path: Path, error: Exception) -> None:
+    """Log a lock permission problem, pointing at the documentation once
+
+    A PermissionError on a lock file almost always means a shared workspace
+    whose files are not group-writable (see issue #270).
+    """
+    global _permission_hint_given
+
+    if isinstance(error, PermissionError) and not _permission_hint_given:
+        _permission_hint_given = True
+        from experimaestro.locking import SHARED_WORKSPACE_DOC
+
+        logger.warning(
+            "Permission denied on lock file %s (%s). Jobs that cannot be "
+            "locked are skipped by the cleanup. If this workspace is shared "
+            "with other users, see %s",
+            path,
+            error,
+            SHARED_WORKSPACE_DOC,
+        )
+    else:
+        logger.debug("Could not lock %s: %s", path, error)
+
+
+def _is_owned_by_current_user(path: Path) -> bool:
+    """Whether a file belongs to the user running this process
+
+    Cleanup must never mutate the files of a job owned by somebody else: in a
+    shared workspace, that job may well be running on a machine we cannot see
+    (see issue #270).
+    """
+    if not hasattr(os, "getuid"):
+        # No meaningful ownership model (Windows)
+        return True
+
+    try:
+        return path.stat().st_uid == os.getuid()
+    except OSError:
+        return False
+
+
+def _is_process_checkable_here(pinfo: dict) -> bool:
+    """Whether a process specification can be checked from this machine"""
+    from experimaestro.connectors import Process
+
+    if not isinstance(pinfo, dict):
+        return False
+
+    try:
+        handler = Process.handler(pinfo.get("type"))
+    except Exception as e:
+        logger.debug("Could not resolve the process handler: %s", e)
+        return False
+
+    if handler is None:
+        # Unknown process type: the launcher is not installed here
+        return False
+
+    if not handler.host_dependent:
+        # e.g. a SLURM job ID, checkable from any machine of the cluster
+        return True
+
+    # A host-dependent identifier (an OS PID) is only meaningful on the host
+    # that produced it. Older PID files do not record the host: in that case
+    # we assume it is ours, the ownership check being the safety net.
+    host = pinfo.get("host")
+    return host is None or host == socket.gethostname()
+
+
+def _probe_process(pidfile: Path) -> bool | None:
+    """Check whether the process described by a PID file is alive
+
+    Returns True if the process is running, False if it is definitely dead,
+    and None when this cannot be decided from this machine — the PID belongs
+    to another host, the process type is unknown here, or the launcher could
+    not be queried (e.g. no ``squeue`` on the monitoring machine).
+
+    Callers MUST treat None as "still active": declaring a job dead when we
+    simply cannot see it corrupts jobs running elsewhere (issue #270).
+    """
+    from experimaestro.connectors import Process
+    from experimaestro.connectors.local import LocalConnector
+
+    try:
+        pinfo = json.loads(pidfile.read_text())
+    except (OSError, ValueError) as e:
+        logger.debug("Could not read PID file %s: %s", pidfile, e)
+        return None
+
+    if not _is_process_checkable_here(pinfo):
+        logger.debug(
+            "Process %s of %s cannot be checked from this machine", pinfo, pidfile
+        )
+        return None
+
+    try:
+        # fromDefinition returns None only if the process is known to be gone
+        return Process.fromDefinition(LocalConnector.instance(), pinfo) is not None
+    except Exception as e:
+        logger.debug("Could not query the process of %s: %s", pidfile, e)
+        return None
+
+
 def _cleanup_stale_pid_files(workspace_path: Path) -> int:
     """Scan all job directories and remove stale PID files.
 
@@ -322,8 +435,6 @@ def _cleanup_stale_pid_files(workspace_path: Path) -> int:
     """
     import filelock
 
-    from experimaestro.connectors import Process
-    from experimaestro.connectors.local import LocalConnector
     from experimaestro.locking import create_file_lock
     from experimaestro.scheduler.interfaces import BaseJob
 
@@ -356,18 +467,20 @@ def _cleanup_stale_pid_files(workspace_path: Path) -> int:
                     if not pidfile.exists():
                         continue
 
-                    # Check if process is alive
-                    process_alive = False
-                    try:
-                        pinfo = json.loads(pidfile.read_text())
-                        connector = LocalConnector.instance()
-                        process = Process.fromDefinition(connector, pinfo)
-                        if process is not None:
-                            process_alive = True
-                    except Exception:
-                        pass
+                    # Check if the process is alive. Anything but a definite
+                    # "dead" answer (None = cannot be checked from here) means
+                    # we leave the job alone.
+                    if _probe_process(pidfile) is not False:
+                        continue
 
-                    if process_alive:
+                    # Never touch the files of a job owned by another user:
+                    # it may be running on a machine we cannot see
+                    if not _is_owned_by_current_user(pidfile):
+                        logger.debug(
+                            "PID file %s belongs to another user, "
+                            "leaving the job state untouched",
+                            pidfile,
+                        )
                         continue
 
                     # Process is dead — remove stale PID file
@@ -396,6 +509,11 @@ def _cleanup_stale_pid_files(workspace_path: Path) -> int:
             except filelock.Timeout:
                 # Job is active, skip
                 continue
+            except (PermissionError, OSError) as e:
+                # Lock file owned by another user (shared workspace), or an
+                # unreadable directory: skip rather than crash
+                _log_permission_error(lock_path, e)
+                continue
             except Exception as e:
                 logger.debug("Error checking PID file %s: %s", pidfile, e)
                 continue
@@ -422,9 +540,11 @@ def _is_job_active(job_path: Path, task_id: str) -> bool:
     - PID file exists with a running process (uses launcher-independent
       Process abstraction), OR
     - No terminal marker (.done/.failed) exists (could be in the gap)
+
+    A job is also considered active when its process cannot be checked from
+    this machine, or when its files belong to another user: a monitor must
+    never declare dead a job it simply cannot see (issue #270).
     """
-    from experimaestro.connectors import Process
-    from experimaestro.connectors.local import LocalConnector
     from experimaestro.scheduler.interfaces import BaseJob
 
     scriptname = BaseJob.get_scriptname(task_id)
@@ -433,15 +553,27 @@ def _is_job_active(job_path: Path, task_id: str) -> bool:
     # launcher-independent Process abstraction
     pidfile = BaseJob.get_pidfile(job_path, scriptname)
     if pidfile.exists():
-        try:
-            pinfo = json.loads(pidfile.read_text())
-            connector = LocalConnector.instance()
-            process = Process.fromDefinition(connector, pinfo)
-            # fromDefinition succeeds only if the process exists
-            if process is not None:
-                return True
-        except Exception:
-            pass
+        alive = _probe_process(pidfile)
+        if alive is None:
+            # The process cannot be checked from here (other host, launcher
+            # not available, ...): assume the job is still active
+            logger.debug(
+                "Cannot check the process of job %s from this machine, "
+                "assuming it is active",
+                task_id,
+            )
+            return True
+
+        if alive:
+            return True
+
+        if not _is_owned_by_current_user(pidfile):
+            logger.debug(
+                "PID file of job %s belongs to another user, "
+                "leaving the job state untouched",
+                task_id,
+            )
+            return True
 
         # Process is dead — remove stale PID file (lock is held)
         logger.info("Removing stale PID file for job %s", task_id)
@@ -471,6 +603,53 @@ def _is_job_active(job_path: Path, task_id: str) -> bool:
         return True
 
     return False
+
+
+def _collect_job_event_files(
+    workspace_path: Path, jobs_dir: Path
+) -> dict[tuple[str, str], list[Path]]:
+    """Collect job event files from both flat and old nested formats
+
+    Returns:
+        Dict mapping (task_id, job_id) to the list of event file paths
+    """
+    from experimaestro.scheduler.state_status import (
+        _JOB_EVENT_FLAT_RE,
+        task_id_hash,
+    )
+
+    # Build hash8 → task_id mapping from the jobs directory
+    hash_to_task_id: dict[str, str] = {}
+    actual_jobs_dir = workspace_path / "jobs"
+    if actual_jobs_dir.exists():
+        for task_dir in actual_jobs_dir.iterdir():
+            if task_dir.is_dir():
+                h = task_id_hash(task_dir.name)
+                hash_to_task_id[h] = task_dir.name
+
+    job_files_map: dict[tuple[str, str], list[Path]] = {}  # (task_id, job_id) -> files
+
+    # New flat format: {hash8}-{job_id}-{count}.jsonl directly in jobs_dir
+    for event_file in jobs_dir.glob("*-*-*.jsonl"):
+        m = _JOB_EVENT_FLAT_RE.match(event_file.name)
+        if m:
+            h, job_id = m.group(1), m.group(2)
+            task_id = hash_to_task_id.get(h)
+            if task_id:
+                job_files_map.setdefault((task_id, job_id), []).append(event_file)
+
+    # Backwards compat: old nested format {task_id}/event-{job_id}-{count}.jsonl
+    for task_dir in jobs_dir.iterdir():
+        if not task_dir.is_dir():
+            continue
+        task_id = task_dir.name
+        for event_file in task_dir.glob("event-*-*.jsonl"):
+            parts = event_file.name.split("-")
+            if len(parts) >= 3:
+                job_id = parts[1]
+                job_files_map.setdefault((task_id, job_id), []).append(event_file)
+
+    return job_files_map
 
 
 def _check_orphaned_job_events(
@@ -505,45 +684,7 @@ def _check_orphaned_job_events(
     if not jobs_dir.exists():
         return warnings, callbacks
 
-    from experimaestro.scheduler.state_status import (
-        _JOB_EVENT_FLAT_RE,
-        task_id_hash,
-    )
-
-    # Build hash8 → task_id mapping from the jobs directory
-    hash_to_task_id: dict[str, str] = {}
-    actual_jobs_dir = workspace_path / "jobs"
-    if actual_jobs_dir.exists():
-        for task_dir in actual_jobs_dir.iterdir():
-            if task_dir.is_dir():
-                h = task_id_hash(task_dir.name)
-                hash_to_task_id[h] = task_dir.name
-
-    # Collect event files: new flat format + old nested format
-    job_files_map: dict[tuple[str, str], list[Path]] = {}  # (task_id, job_id) -> files
-
-    # New flat format: {hash8}-{job_id}-{count}.jsonl directly in jobs_dir
-    for event_file in jobs_dir.glob("*-*-*.jsonl"):
-        m = _JOB_EVENT_FLAT_RE.match(event_file.name)
-        if m:
-            h, job_id = m.group(1), m.group(2)
-            task_id = hash_to_task_id.get(h)
-            if task_id:
-                key = (task_id, job_id)
-                job_files_map.setdefault(key, []).append(event_file)
-
-    # Backwards compat: old nested format {task_id}/event-{job_id}-{count}.jsonl
-    for task_dir in jobs_dir.iterdir():
-        if not task_dir.is_dir():
-            continue
-        task_id = task_dir.name
-        for event_file in task_dir.glob("event-*-*.jsonl"):
-            filename = event_file.name
-            parts = filename.split("-")
-            if len(parts) >= 3:
-                job_id = parts[1]
-                key = (task_id, job_id)
-                job_files_map.setdefault(key, []).append(event_file)
+    job_files_map = _collect_job_event_files(workspace_path, jobs_dir)
 
     # Consolidate events for each job
     for (task_id, job_id), files in job_files_map.items():
@@ -614,6 +755,11 @@ def _check_orphaned_job_events(
                 task_id,
                 job_id,
             )
+            continue
+        except (PermissionError, OSError) as e:
+            # The lock file belongs to another user (shared workspace) and is
+            # not writable by us: skip this job rather than crash
+            _log_permission_error(lock_path, e)
             continue
 
     # Clean up empty old-format subdirectories

@@ -560,6 +560,9 @@ class SlurmProcessWatcher(threading.Thread):
 class BatchSlurmProcess(Process):
     """A batch slurm process"""
 
+    # A SLURM job ID can be checked from any machine of the cluster
+    host_dependent = False
+
     def __init__(
         self, launcher: "SlurmLauncher", jobid: str, *, hold_watcher: bool = False
     ):

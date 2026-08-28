@@ -262,6 +262,18 @@ experimaestro experiments ssh-monitor myserver /workspace --remote-xpm /opt/cond
    on-demand using rsync over SSH
 5. **Real-time Updates**: The server sends notifications when job states change
 
+### Shared Workspaces
+
+Like the other monitors, `ssh-monitor` runs the workspace cleanup, so that
+crashed jobs are recovered without waiting for the next experiment. This is safe
+in a workspace shared with other users: a job whose process cannot be checked
+from the monitoring machine (its PID belongs to another host, or its launcher is
+not reachable) is considered active, and job files owned by another user are
+never modified.
+
+See [Sharing a workspace](settings.md#sharing-a-workspace) for the filesystem
+permissions and the `lock_mode` setting a shared workspace needs.
+
 ### Configuring SSH Settings in `settings.yaml`
 
 Instead of passing all options on the command line, you can configure SSH settings

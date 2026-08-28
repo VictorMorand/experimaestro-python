@@ -81,6 +81,12 @@ class Process:
     #: List of handlers
     HANDLERS: dict[str, "Process"] = None
 
+    #: Whether a serialized specification is only meaningful on the host that
+    #: produced it. This is the case for OS process identifiers, but not for
+    #: cluster-wide job identifiers (e.g. SLURM job IDs) which can be checked
+    #: from any machine of the cluster.
+    host_dependent: bool = True
+
     @classmethod
     def fromspec(cls, connector: "Connector", definition: Dict[str, Any]) -> "Process":
         """Rebuild a process from a specification"""

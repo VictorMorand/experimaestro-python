@@ -187,6 +187,19 @@ class WorkspaceSettings:
     max_retries: int = 3
     """Maximum number of retries for resumable tasks that timeout (default: 3)"""
 
+    lock_mode: str = "inherit"
+    """Permissions of the lock files created within this workspace
+
+    - ``inherit`` (default): mirror the read/write permissions of the workspace
+      directory, so that a group-writable workspace yields group-writable lock
+      files whatever the umask is
+    - ``umask``: apply the process umask to 0o666 (a umask of 022 gives 0644)
+    - an octal mode such as ``"0664"``: use that mode
+
+    The ``XPM_LOCK_MODE`` environment variable overrides this setting. See
+    :ref:`sharing-a-workspace` for shared workspaces.
+    """
+
     triggers: List[str] = field(default_factory=list)
     """Glob patterns to automatically select this workspace based on experiment ID"""
 
@@ -288,6 +301,23 @@ def get_workspace(
         for workspace in workspaces:
             if id == workspace.id:
                 return workspace
+
+    return None
+
+
+def get_workspace_by_path(path: Path) -> Optional[WorkspaceSettings]:
+    """Return the settings of the (local) workspace located at a given path"""
+    path = Path(path).expanduser().resolve()
+
+    try:
+        workspaces = get_settings().workspaces
+    except Exception as e:
+        logging.debug("Could not read the settings: %s", e)
+        return None
+
+    for workspace in workspaces:
+        if not workspace.is_remote and Path(workspace.path) == path:
+            return workspace
 
     return None
 

@@ -4,6 +4,7 @@ import asyncio
 from abc import ABC, abstractmethod
 import json
 import logging
+import os
 import os.path
 from pathlib import Path
 import threading
@@ -21,57 +22,218 @@ logger = logging.getLogger("xpm.locking")
 # With base mode 0o666 and umask 002, this results in 0o664 (group-writable).
 LOCK_FILE_BASE_MODE = 0o666
 
+#: Lock mode specification: mirror the permissions of the workspace directory
+LOCK_MODE_INHERIT = "inherit"
 
-def _get_effective_mode() -> int:
-    """Get the effective lock file mode after applying umask.
+#: Lock mode specification: apply the process umask to LOCK_FILE_BASE_MODE
+LOCK_MODE_UMASK = "umask"
+
+#: Environment variable overriding the lock file mode of every lock. Its value
+#: is a lock mode specification (an octal mode, "inherit" or "umask")
+LOCK_MODE_ENV = "XPM_LOCK_MODE"
+
+#: Documentation pointer given when a lock file cannot be accessed
+SHARED_WORKSPACE_DOC = (
+    "https://experimaestro-python.readthedocs.io/en/latest/settings.html"
+    "#sharing-a-workspace"
+)
+
+#: Lock mode specifications of the registered workspaces (resolved path -> spec)
+_workspace_lock_modes: dict[Path, "str | int"] = {}
+_workspace_lock_modes_lock = threading.Lock()
+
+
+def _umask_mode() -> int:
+    """The lock file mode obtained by applying the umask to the base mode
 
     The filelock library's mode parameter uses os.chmod() which doesn't
-    respect umask, so we manually apply it here.
-
-    Returns:
-        The effective mode (LOCK_FILE_BASE_MODE & ~umask)
+    respect umask, so we apply it ourselves.
     """
-    import os
-
     # Get current umask without changing it
     current_umask = os.umask(0)
     os.umask(current_umask)
     return LOCK_FILE_BASE_MODE & ~current_umask
 
 
-def create_file_lock(path: str | Path, timeout: float = -1) -> filelock.FileLock:
-    """Create a FileLock with proper permissions respecting umask.
+def parse_lock_mode(spec: "str | int | None") -> "str | int":
+    """Parse a lock mode specification
 
-    The lock file mode is LOCK_FILE_BASE_MODE (0o666) with the current umask
-    applied. This ensures group-writable permissions when umask allows it.
+    Args:
+        spec: LOCK_MODE_INHERIT, LOCK_MODE_UMASK, an octal string ("0664",
+            "664" or "0o664"), an integer mode, or None for the default
+
+    Returns:
+        LOCK_MODE_INHERIT, LOCK_MODE_UMASK, or an integer mode
+    """
+    if spec is None:
+        return LOCK_MODE_INHERIT
+
+    if isinstance(spec, int):
+        return spec & LOCK_FILE_BASE_MODE
+
+    spec = spec.strip()
+    if spec in (LOCK_MODE_INHERIT, LOCK_MODE_UMASK):
+        return spec
+
+    try:
+        return int(spec, 8) & LOCK_FILE_BASE_MODE
+    except ValueError:
+        logger.warning(
+            "Invalid lock mode %r (expected an octal mode, %r or %r), using %r",
+            spec,
+            LOCK_MODE_INHERIT,
+            LOCK_MODE_UMASK,
+            LOCK_MODE_INHERIT,
+        )
+        return LOCK_MODE_INHERIT
+
+
+def resolve_lock_mode(
+    spec: "str | int | None", reference_dir: "str | Path | None" = None
+) -> int:
+    """Resolve a lock mode specification into a file mode
+
+    Args:
+        spec: Lock mode specification (see :func:`parse_lock_mode`)
+        reference_dir: Directory whose permissions are mirrored when the
+            specification is LOCK_MODE_INHERIT (typically the workspace
+            directory). The umask is used when it cannot be read.
+
+    Returns:
+        The mode to use for lock files
+    """
+    mode = parse_lock_mode(spec)
+
+    if isinstance(mode, int):
+        return mode
+
+    if mode == LOCK_MODE_UMASK or reference_dir is None:
+        return _umask_mode()
+
+    # Inherit: mirror the read/write permissions of the reference directory,
+    # so that a group-shared workspace yields group-writable lock files
+    # whatever the umask is
+    try:
+        dir_mode = Path(reference_dir).stat().st_mode
+    except OSError as e:
+        logger.debug("Could not stat %s (%s), falling back to umask", reference_dir, e)
+        return _umask_mode()
+
+    return dir_mode & LOCK_FILE_BASE_MODE
+
+
+def register_workspace_lock_mode(
+    workspace_path: "str | Path", spec: "str | int | None" = LOCK_MODE_INHERIT
+) -> "str | int":
+    """Register the lock file mode to use for locks inside a workspace
+
+    Locks are created all over the code base, most of the time without a
+    :class:`~experimaestro.scheduler.workspace.Workspace` at hand. Registering
+    the workspace root makes :func:`create_file_lock` use the right mode for
+    every lock file below it — including in monitoring processes, which only
+    know the workspace path.
+
+    The specification is resolved when a lock is created, not here: the
+    workspace directory may not exist yet at registration time.
+
+    Args:
+        workspace_path: Path of the workspace root
+        spec: Lock mode specification (see :func:`parse_lock_mode`)
+
+    Returns:
+        The parsed specification
+    """
+    workspace_path = Path(workspace_path).resolve()
+    spec = parse_lock_mode(spec)
+
+    with _workspace_lock_modes_lock:
+        _workspace_lock_modes[workspace_path] = spec
+
+    logger.debug("Lock files of workspace %s use mode %s", workspace_path, spec)
+    return spec
+
+
+def _registered_workspace(path: Path) -> "tuple[Path, str | int] | None":
+    """Innermost registered workspace containing a path, with its mode spec"""
+    with _workspace_lock_modes_lock:
+        if not _workspace_lock_modes:
+            return None
+        candidates = list(_workspace_lock_modes.items())
+
+    best = None
+    best_length = -1
+    for workspace_path, spec in candidates:
+        parts = len(workspace_path.parts)
+        if parts > best_length and path.is_relative_to(workspace_path):
+            best, best_length = (workspace_path, spec), parts
+
+    return best
+
+
+def get_lock_file_mode(path: "str | Path", mode: "int | None" = None) -> int:
+    """Get the mode to use for a lock file
+
+    The mode is, in order of priority:
+
+    1. the explicit mode given by the caller (see
+       :meth:`~experimaestro.scheduler.workspace.Workspace.create_file_lock`)
+    2. the LOCK_MODE_ENV environment variable
+    3. the mode registered for the workspace containing the lock file
+       (see :func:`register_workspace_lock_mode`)
+    4. LOCK_FILE_BASE_MODE with the umask applied
+    """
+    if mode is not None:
+        return mode
+
+    registered = _registered_workspace(Path(path).resolve())
+
+    env_spec = os.environ.get(LOCK_MODE_ENV)
+    if env_spec:
+        reference = registered[0] if registered else Path(path).parent
+        return resolve_lock_mode(env_spec, reference)
+
+    if registered is not None:
+        workspace_path, spec = registered
+        return resolve_lock_mode(spec, workspace_path)
+
+    return _umask_mode()
+
+
+def create_file_lock(
+    path: str | Path, timeout: float = -1, *, mode: "int | None" = None
+) -> filelock.FileLock:
+    """Create a FileLock with the mode of its workspace.
 
     Args:
         path: Path to the lock file
         timeout: Timeout for acquiring the lock (-1 for infinite)
+        mode: Explicit lock file mode; when None, the mode is resolved by
+            :func:`get_lock_file_mode`
 
     Returns:
         A FileLock instance with the correct mode
     """
-    return filelock.FileLock(str(path), timeout=timeout, mode=_get_effective_mode())
+    return filelock.FileLock(
+        str(path), timeout=timeout, mode=get_lock_file_mode(path, mode)
+    )
 
 
 def create_async_file_lock(
-    path: str | Path, timeout: float = -1
+    path: str | Path, timeout: float = -1, *, mode: "int | None" = None
 ) -> filelock.AsyncFileLock:
-    """Create an AsyncFileLock with proper permissions respecting umask.
-
-    The lock file mode is LOCK_FILE_BASE_MODE (0o666) with the current umask
-    applied. This ensures group-writable permissions when umask allows it.
+    """Create an AsyncFileLock with the mode of its workspace.
 
     Args:
         path: Path to the lock file
         timeout: Timeout for acquiring the lock (-1 for infinite)
+        mode: Explicit lock file mode; when None, the mode is resolved by
+            :func:`get_lock_file_mode`
 
     Returns:
         An AsyncFileLock instance with the correct mode
     """
     return filelock.AsyncFileLock(
-        str(path), timeout=timeout, mode=_get_effective_mode()
+        str(path), timeout=timeout, mode=get_lock_file_mode(path, mode)
     )
 
 

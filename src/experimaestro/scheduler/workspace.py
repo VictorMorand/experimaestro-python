@@ -5,6 +5,12 @@ import logging
 import warnings
 from pathlib import Path
 from typing import List, Optional
+from experimaestro.locking import (
+    create_async_file_lock,
+    create_file_lock,
+    register_workspace_lock_mode,
+    resolve_lock_mode,
+)
 from experimaestro.settings import (
     FolderMode,
     FolderSettings,
@@ -89,6 +95,34 @@ class Workspace:
 
         # Scheduler run ID (set when first used)
         self._scheduler_run_id: Optional[str] = None
+
+        # Mode of the lock files created within this workspace: registering it
+        # makes every lock below the workspace path use it, even when created
+        # by code that has no access to this object
+        register_workspace_lock_mode(self.path, workspace_settings.lock_mode)
+
+    @property
+    def lock_mode(self) -> int:
+        """Mode of the lock files created within this workspace"""
+        return resolve_lock_mode(self.workspace_settings.lock_mode, self.path)
+
+    def create_file_lock(self, path: Path, timeout: float = -1):
+        """Create a file lock with the permissions of this workspace
+
+        Args:
+            path: Path to the lock file
+            timeout: Timeout for acquiring the lock (-1 for infinite)
+        """
+        return create_file_lock(path, timeout, mode=self.lock_mode)
+
+    def create_async_file_lock(self, path: Path, timeout: float = -1):
+        """Create an asynchronous file lock with the permissions of this workspace
+
+        Args:
+            path: Path to the lock file
+            timeout: Timeout for acquiring the lock (-1 for infinite)
+        """
+        return create_async_file_lock(path, timeout, mode=self.lock_mode)
 
     def __enter__(self):
         # Increment reference count
@@ -272,7 +306,6 @@ class Workspace:
         """
         import shutil
         import time
-        from experimaestro.locking import create_file_lock
 
         scheduler_base = self.schedulerpath
         if not scheduler_base.exists():
@@ -281,7 +314,7 @@ class Workspace:
         # Use lock file in the current run directory to prevent concurrent cleanup
         lock_file = self.scheduler_lock_path
         lock_file.parent.mkdir(parents=True, exist_ok=True)
-        lock = create_file_lock(lock_file, timeout=0)
+        lock = self.create_file_lock(lock_file, timeout=0)
 
         try:
             lock.acquire()

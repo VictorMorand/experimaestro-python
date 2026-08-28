@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 if TYPE_CHECKING:
     from experimaestro.core.serialization import ExperimentInfo
 
+from experimaestro.locking import LOCK_MODE_INHERIT, register_workspace_lock_mode
 from experimaestro.scheduler.interfaces import (
     BaseExperiment,
     BaseJob,
@@ -102,6 +103,12 @@ class WorkspaceStateProvider(OfflineStateProvider):
         self.workspace_path = Path(workspace_path).resolve()
         self._experiments_dir = self.workspace_path / ".events" / "experiments"
 
+        # Register the lock file permissions of this workspace: monitoring
+        # processes never build a Workspace, but still take job locks
+        register_workspace_lock_mode(
+            self.workspace_path, self._workspace_lock_mode_setting()
+        )
+
         # Event reader (with built-in watching capability)
         self._event_reader: Optional[EventReader] = None
         self._jobs_dir = self.workspace_path / ".events" / "jobs"
@@ -124,6 +131,13 @@ class WorkspaceStateProvider(OfflineStateProvider):
         self._cleanup_legacy_symlinks()
 
         self._start_watcher()
+
+    def _workspace_lock_mode_setting(self) -> str:
+        """Lock mode configured for this workspace in the settings"""
+        from experimaestro.settings import get_workspace_by_path
+
+        settings = get_workspace_by_path(self.workspace_path)
+        return settings.lock_mode if settings is not None else LOCK_MODE_INHERIT
 
     def _find_current_symlink(self, experiment_id: str) -> Path | None:
         """Find the 'current' symlink for an experiment.

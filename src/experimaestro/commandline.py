@@ -3,6 +3,7 @@
 import json
 import io
 import os
+import socket
 import sys
 from pathlib import Path
 from typing import List, Optional, Union, Callable, Dict
@@ -307,8 +308,12 @@ class CommandLineJob(Job):
         processbuilder.stdout = Redirect.file(self.stdout)
         self._process = processbuilder.start(True)
 
+        # The host is recorded so that a monitor running elsewhere knows that
+        # it cannot check a host-dependent process identifier (see #270)
+        spec = self._process.tospec()
+        spec.setdefault("host", socket.gethostname())
         with self.pidpath.open("w") as fp:
-            json.dump(self._process.tospec(), fp)
+            json.dump(spec, fp)
 
         # Write status with process info
         self.state = JobState.SCHEDULED
