@@ -70,29 +70,24 @@ Experimaestro's distinct features include:
    experiments declaratively, Experimaestro adopts an imperative approach,
    enhancing flexibility in complex experimental planning.
 
-## Guide to the Documentation
+## Where to start
 
-**🏁 Getting Started**
-If you are new to the project, start with the [Tutorial](./tutorial.md). It walks you through setting up your first workspace and running a basic experiment: training a CNN on MNIST.
+**New here?** The [Tutorial](./tutorial.md) walks you through your first
+workspace and a first experiment: training a CNN on MNIST.
 
-**🧪 Building Experiments**
-Learn how to define your workflow:
-  - [Configurations](./experiments/config.md): The heart of Experimaestro. Define parameters, nested structures, and value
-    classes.
-  - [Tasks](./experiments/task.md): Define the execution logic and manage dependencies.
-  - Experimental [Plans](./experiments/plan.md): Compose tasks into complex matrices and track them using tags.
-  - [Experimaestro projects](./experiments/projects.md): How to lay out a project — the package, the `run(helper, cfg)` entry point, the YAML configuration, and the surrounding ecosystem.
-
-**⚙️ Execution & Infrastructure**
-Control where and how your code runs:
-  - [Launchers](./launchers/index.md): Manage execution environments (Direct, Slurm).
-  - [Connectors](./connectors/index.md): Abstract file access and command execution (Local, SSH).
-
-**🛠️ Advanced Tools**
-  - [Jupyter Integration](./jupyter.md): Interact with your experiments from notebooks.
-  - [API Reference](./api/index.md): Deep dive into the classes and methods.
+**Looking for something specific?** The [Guide to the documentation](./guide.md)
+says which page answers which question.
 
 ## Detailed Outline
+
+```{toctree}
+---
+maxdepth: 1
+caption: "Start here"
+---
+tutorial
+guide
+```
 
 ```{toctree}
 ---
@@ -102,12 +97,13 @@ caption: "Experiments"
 experiments/config
 experiments/task
 experiments/plan
-experiments/workspace
-experiments/actions
 experiments/grid_search
+experiments
+experiments/cli-runner
+experiments/actions
 experiments/analysis
 experiments/projects
-experiments
+experiments/workspace
 ```
 
 ```{toctree}

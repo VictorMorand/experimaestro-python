@@ -84,35 +84,12 @@ workspaces:
 
 If an experiment's ID matches multiple workspace triggers, the first matching workspace in the list wins.
 
-(sharing-a-workspace)=
-## Sharing a workspace
+(lock-file-permissions)=
+## Lock file permissions
 
-Several users can share the same workspace directory, so that jobs computed by
-one are reused by the others. This works only if every user can write the files
-of the workspace, which is a matter of filesystem permissions:
-
-```bash
-# A shared, group-writable workspace. The setgid bit (2) makes every file and
-# directory created below it belong to the group
-chgrp -R my_team /scratch/shared
-chmod -R g+w /scratch/shared
-chmod g+s /scratch/shared
-
-# Each user must also create files with group write permission
-umask 002
-```
-
-Alternatively, if the filesystem supports POSIX ACLs, a default ACL grants the
-same permissions without touching the umask:
-
-```bash
-setfacl -R -m g:my_team:rwX /scratch/shared
-setfacl -R -d -m g:my_team:rwX /scratch/shared
-```
-
-### Lock file permissions
-
-Experimaestro protects jobs and experiments with lock files. Their permissions
+Experimaestro protects jobs and experiments with lock files. In a workspace
+shared by several users, these files must be writable by all of them (see
+[Sharing a workspace](experiments.md#sharing-a-workspace)); their permissions
 are controlled by the `lock_mode` workspace setting:
 
 ```yaml
@@ -140,19 +117,8 @@ XPM_LOCK_MODE=0664 experimaestro experiments monitor --workdir /scratch/shared
 ```{note}
 A lock file that cannot be opened (`PermissionError`) is never fatal: the
 corresponding job is simply skipped by the workspace cleanup, and a warning
-pointing at this page is logged.
+pointing at the documentation is logged.
 ```
-
-### What monitoring does to a shared workspace
-
-Monitoring commands (the TUI, the web UI, `ssh-monitor`) run the workspace
-cleanup, which consolidates event files and marks crashed jobs as failed. In a
-shared workspace, this never touches a job that belongs to somebody else:
-
-- a job whose process cannot be checked from the current machine — its PID
-  belongs to another host, or its launcher (e.g. SLURM) is not reachable — is
-  considered active, and neither its `.pid` file nor its events are removed;
-- job files owned by another user are never modified.
 
 ## Auxiliary Folders (Beta)
 

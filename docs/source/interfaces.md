@@ -271,8 +271,10 @@ from the monitoring machine (its PID belongs to another host, or its launcher is
 not reachable) is considered active, and job files owned by another user are
 never modified.
 
-See [Sharing a workspace](settings.md#sharing-a-workspace) for the filesystem
-permissions and the `lock_mode` setting a shared workspace needs.
+See [Sharing a workspace](experiments.md#sharing-a-workspace) for the
+filesystem permissions a shared workspace needs, and
+[Lock file permissions](settings.md#lock-file-permissions) for the `lock_mode`
+setting.
 
 ### Configuring SSH Settings in `settings.yaml`
 

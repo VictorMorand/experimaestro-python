@@ -1,294 +1,186 @@
 # Running experiments
 
-The main class is {py:class}`~experimaestro.experiment` - context manager for running experiments, handling job submission and monitoring.
+An experiment is a piece of Python code that submits tasks within the
+{py:class}`~experimaestro.experiment` context manager. The context manager owns
+the workspace, schedules the submitted jobs, resolves their dependencies, and
+serves the monitoring interfaces.
 
-When using the command line interface to run experiment, the main object
-of interaction is {py:class}`~experimaestro.experiments.cli.ExperimentHelper` - helper class for CLI-based experiment execution.
+## Two ways to run
+
+|  | {py:class}`~experimaestro.experiment` context manager | `experimaestro run-experiment` |
+|---|---|---|
+| Parameters | Written in Python | Read from `YAML` files |
+| Workspace | Given explicitly | Selected from the [settings](settings.md) |
+| Best for | Notebooks, one-off scripts, tests | Projects, reproducible runs, parameter sweeps |
+
+Directly, in Python:
+
+```python
+from experimaestro import experiment
+
+with experiment("/path/to/workspace", "my-experiment", port=12345) as xp:
+    model = Learn.C(epochs=100).submit()
+```
+
+or through the command line, where the experiment code is a `run(helper, cfg)`
+function and its parameters come from a configuration file:
+
+```sh
+experimaestro run-experiment full.yaml
+```
+
+The second form is the recommended one for anything you intend to re-run — see
+[The CLI experiment runner](experiments/cli-runner.md).
+
+## Good practices
+
+### Declare your workspace once
+
+A workspace is where jobs and experiments are stored. Rather than repeating
+`--workdir` on every command, declare it in
+`~/.config/experimaestro/settings.yaml` and let experimaestro select it:
+
+```yaml
+workspaces:
+  - id: neuralir
+    path: ~/experiments/xpmir
+    triggers:
+      - "neuralir-*"
+```
+
+Any experiment whose ID matches a trigger runs in that workspace; `--workspace
+neuralir` selects it explicitly. Keep one workspace per project or per storage
+tier — jobs are shared within a workspace, so two projects that share tasks
+benefit from sharing a workspace. See [Settings](settings.md) for the full
+reference, and [Auxiliary folders](settings.md#auxiliary-folders-beta) when
+results must be archived to another filesystem.
+
+(sharing-a-workspace)=
+### Sharing a workspace
+
+Several users can share a workspace, so that jobs computed by one are reused by
+the others. This only requires that every user can write the files of the
+workspace:
+
+```bash
+# A shared, group-writable workspace. The setgid bit (2) makes every file and
+# directory created below it belong to the group
+chgrp -R my_team /scratch/shared
+chmod -R g+w /scratch/shared
+chmod g+s /scratch/shared
+
+# Each user must also create files with group write permission
+umask 002
+```
+
+If the filesystem supports POSIX ACLs, a default ACL grants the same
+permissions without touching the umask:
+
+```bash
+setfacl -R -m g:my_team:rwX /scratch/shared
+setfacl -R -d -m g:my_team:rwX /scratch/shared
+```
+
+Lock files follow the permissions of the workspace directory by default; see
+[Lock file permissions](settings.md#lock-file-permissions) to configure them.
+
+Monitoring a shared workspace is safe: the cleanup that runs when a monitor
+starts never touches a job that belongs to somebody else. A job whose process
+cannot be checked from the current machine — its PID belongs to another host,
+or its launcher (e.g. SLURM) is not reachable — is considered active, and job
+files owned by another user are never modified.
+
+### Keep task identifiers stable
+
+A job is stored under a directory derived from a hash of its parameters, which
+is what makes results reusable across runs. Renaming a parameter, changing its
+type, or renaming a task class changes that hash: previous results become
+unreachable and are silently recomputed.
+
+- give a parameter a default with `field(ignore_default=X)` (ignored in the
+  identifier) or `field(default=X)` (always part of it), never with a bare
+  `x: Param[int] = 23`
+- pin a task identifier with `__xpmid__` so that renaming the class is free
+- when a parameter must change, keep the old one alive with
+  {py:class}`~experimaestro.DeprecatedAttribute`
+
+See [Configurations](experiments/config.md) for the details, and
+`experimaestro deprecated` to inspect the identifiers affected by a change.
+
+### Running on a cluster
+
+Where a task runs is decided by its [launcher](launchers/index.md), and how the
+files are accessed by its [connector](connectors/index.md). A specification
+(`cuda(mem=24G) & cpu(cores=4)`) is matched against the launchers declared in
+your settings, so the same experiment code runs locally and on a cluster.
+
+Two things are worth setting up early:
+
+- **Limit concurrency** with a token when a resource is scarce — the scheduler
+  will hold the jobs back rather than let them fail:
+
+  ```python
+  with experiment(workdir, "my-experiment") as xp:
+      xp.token = xp.token("main", 4)  # at most 4 jobs at a time
+  ```
+
+- **Survive walltime limits** by deriving long tasks from
+  {py:class}`~experimaestro.ResumableTask`: check `remaining_time()`, save a
+  checkpoint and raise {py:class}`~experimaestro.GracefulTimeout` before the
+  limit is reached. Such a task is retried automatically (`max_retries`, 3 by
+  default, configurable per workspace or per `submit()`) and keeps its
+  directory between attempts. See [Tasks](experiments/task.md).
+
+### Monitoring and recovering
+
+An experiment can be followed live, and a workspace inspected long after the
+fact:
+
+```bash
+# Terminal UI (add --port to get the web UI instead)
+experimaestro experiments --workdir /path/to/workspace monitor --console
+
+# The same, for a workspace on a remote machine
+experimaestro experiments ssh-monitor --workspace my-cluster
+```
+
+Both are described in [Interfaces](interfaces.md). Starting a monitor also
+performs a workspace cleanup: event files are consolidated, and jobs whose
+process died without leaving a marker are marked as failed, so that the next
+experiment does not wait on them. Jobs that are no longer part of any
+experiment are reported rather than deleted:
+
+```bash
+experimaestro orphans /path/to/workspace
+```
+
+### Iterating without losing work
+
+- `--run-mode DRY_RUN` (and `GENERATE_ONLY`, `PREPARE`) walks the experimental
+  plan without executing anything — the fastest way to check what a change
+  would submit
+- `--show` prints the merged YAML configuration, which usually explains an
+  unexpected parameter
+- keep `dirty_git: error` on experiments meant to be reproducible, so that a
+  result can always be traced back to a commit
+- tag the parameters that vary in your plan; the [analysis](experiments/analysis.md)
+  tools then group results by tag rather than by directory name
 
 ## Experiment services
 
-- {py:class}`~experimaestro.scheduler.services.Service` - Base class for experiment services.
-- {py:class}`~experimaestro.scheduler.services.WebService` - Web-based service with HTTP endpoint.
-- {py:class}`~experimaestro.scheduler.services.ServiceListener` - Listener for service state changes.
-
-
-## Experiment configuration
-
-The module `experimaestro.experiments` contain code factorizing boilerplate for
-launching experiments. It allows to setup the experimental environment and
-read ``YAML`` configuration files to setup some experimental parameters.
-
-This can be extended to support more specific experiment helpers (see e.g.
-experimaestro-ir for an example).
-
-{py:class}`~experimaestro.experiments.ConfigurationBase` should be the parent class of any configuration.
-
-### Example
-
-An `experiment.py` file:
-
-```python
-from experimaestro.experiments import ExperimentHelper, configuration, ConfigurationBase
-
-@configuration
-class Configuration(ConfigurationBase):
-    #: Default learning rate
-    learning_rate: float = 1e-3
-
-def run(
-    helper: ExperimentHelper, cfg: Configuration
-):
-    # Experimental code
-    ...
-```
-
-With `full.yaml` located in the same folder as `experiment.py`
-
-```yaml
-    file: experiment
-    learning_rate: 1e-4
-```
-
-The experiment can be started with
-
-```sh
-    experimaestro run-experiment --run-mode NORMAL full.yaml
-```
-
-See the [CLI documentation](cli.md#running-experiments) for more details
-
-### Experiment code in a module
-
-The Python path can be set by the configuration file, and module be used instead
-of a file:
-
-```yaml
-    # Module name containing the "run" function
-    module: first_stage.experiment
-
-    # Python paths relative to the directory containing this YAML file
-    # By default, the python path is based on the hypothesis that
-    # the YAML file is in the same folder as the loaded python module.
-    # For instance, for `first_stage.experiment`, the python path
-    # would be set automatically to the parent folder `..`. For `first_stage.sub.experiment`,
-    # this would be set to `../..`
-    pythonpath:
-        - ..
-```
-
-### YAML Configuration Reference
-
-The YAML configuration file supports the following options from {py:class}`~experimaestro.experiments.ConfigurationBase`:
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `id` | string | **required** | Unique identifier for the experiment |
-| `file` | string | `"experiment"` | Relative path to the Python file containing the `run` function |
-| `module` | string | `None` | Python module containing the `run` function (mutually exclusive with `file`) |
-| `pythonpath` | list | `None` | List of paths to add to Python path (relative to YAML file directory) |
-| `imports` | list | `None` | List of YAML file paths to import and merge (current file takes priority) |
-| `parent` | string | `None` | *(Deprecated, use `imports`)* Relative path to a parent YAML file to inherit from |
-| `pre_experiment` | string | `None` | Python file path or module name to execute before importing the experiment |
-| `title` | string | `""` | Short description of the experiment |
-| `subtitle` | string | `""` | Additional details about the experiment |
-| `description` | string | `""` | Full description of the experiment |
-| `paper` | string | `""` | Source paper reference for this experiment |
-| `add_timestamp` | bool | `False` | Append timestamp (`YYYYMMDD-HHMM`) to experiment ID |
-| `dirty_git` | string | `"warn"` | Action when git has uncommitted changes: `ignore`, `warn`, or `error` |
-
-#### Configuration inheritance
-
-YAML files can import other configuration files using the `imports` option. Imported files are merged in order, with the current file taking priority:
-
-```yaml
-# base.yaml
-id: base-experiment
-learning_rate: 1e-3
-batch_size: 32
-```
-
-```yaml
-# optimizer.yaml
-optimizer: adam
-weight_decay: 0.01
-```
-
-```yaml
-# experiment.yaml
-imports:
-  - base.yaml
-  - optimizer.yaml
-id: my-experiment
-learning_rate: 1e-4  # Override value from base.yaml
-```
-
-#### Multiple YAML files
-
-You can also merge multiple YAML files using CLI options:
-
-```bash
-# Pre-yaml files are loaded first, then main file, then post-yaml files
-experimaestro run-experiment --pre-yaml defaults.yaml --post-yaml overrides.yaml main.yaml
-```
-
-#### Inline configuration overrides
-
-Override specific values from the command line using `-c` with [OmegaConf dotlist syntax](https://omegaconf.readthedocs.io/):
-
-```bash
-# Simple values
-experimaestro run-experiment -c learning_rate=1e-5 -c batch_size=64 experiment.yaml
-
-# Nested values using dot notation
-experimaestro run-experiment -c model.hidden_size=512 -c model.num_layers=6 experiment.yaml
-
-# List items by index
-experimaestro run-experiment -c data.transforms.0.name=resize experiment.yaml
-```
-
-#### Previewing the merged configuration
-
-Use `--show` to output the final merged configuration as JSON without running the experiment. This is useful for debugging configuration inheritance and overrides:
-
-```bash
-experimaestro run-experiment --show experiment.yaml
-
-# With overrides - see the final result
-experimaestro run-experiment --show -c learning_rate=1e-5 --pre-yaml base.yaml experiment.yaml
-```
-
-### Pre-experiment Setup
-
-The `pre_experiment` option allows you to run Python code **before** the experiment module is imported. It can be specified as:
-
-- **A file path**: Relative path to a Python file (e.g., `pre_experiment.py`)
-- **A module name**: Python module to import (e.g., `mypackage.pre_experiment`)
-
-This is useful for:
-
-- Setting environment variables to control library behavior
-- Mocking heavy modules to speed up the experiment setup phase (the actual job execution will use real modules)
-- Configuring logging or other global state
-
-#### Example: Mock heavy modules with mock_modules
-
-For experiments that import heavy libraries like PyTorch or transformers, you can use {py:func}`~experimaestro.experiments.mock_modules` to mock these modules during the experiment setup phase. This significantly speeds up configuration parsing while the actual job execution still uses the real modules.
-
-```python
-# pre_experiment.py
-import os
-from experimaestro.experiments import mock_modules
-
-# Set environment variables
-os.environ["OMP_NUM_THREADS"] = "4"
-
-# Mock PyTorch and related modules (submodules are automatically included)
-mock_modules(['torch', 'pytorch_lightning', 'transformers', 'huggingface_hub'])
-```
-
-```yaml
-id: my-experiment
-pre_experiment: pre_experiment.py
-file: experiment
-```
-
-The `mock_modules` function provides:
-
-- **Module mocking**: Any import of the specified modules returns fake objects that silently accept attribute access, method calls, and instantiation
-- **Automatic decorator support**: All mocked objects work as decorators, supporting both `@decorator` and `@decorator(args)` patterns (e.g., `@torch.compile`, `@torch.no_grad()`, `@torch.jit.script`)
-- **Inheritance support**: Code that inherits from mocked classes (like `torch.nn.Module` or `torch.autograd.Function`) works correctly without metaclass conflicts
-- **Generic type support**: Subscript notation like `Tensor[int]` or `Module[str, Tensor]` works correctly
-
-This is particularly useful for large codebases with many PyTorch modules where importing takes significant time during experiment configuration.
-
-#### Example: Using a module name
-
-If you have a package with a pre-experiment module, you can reference it by module name:
-
-```yaml
-id: my-experiment
-pre_experiment: mypackage.pre_experiment
-module: mypackage.experiment
-```
-
-This is useful when:
-- Your pre-experiment code is part of an installed package
-- You want to share pre-experiment setup across multiple experiments
-
-### Dirty Git Check
-
-Experimaestro can check whether your project's git repository has uncommitted changes when starting an experiment. This helps ensure reproducibility by warning you (or preventing you) from running experiments with uncommitted code changes.
-
-The `dirty_git` option controls the behavior:
-
-| Value | Description |
-|-------|-------------|
-| `ignore` | Don't check or warn about uncommitted changes |
-| `warn` | Log a warning if there are uncommitted changes (default) |
-| `error` | Raise a {py:class}`~experimaestro.DirtyGitError` exception and abort the experiment |
-
-#### YAML configuration
-
-```yaml
-id: my-experiment
-dirty_git: error  # Fail if git is dirty
-```
-
-#### Python API
-
-When using the experiment context manager directly, you can pass the `dirty_git` parameter:
-
-```python
-from experimaestro import experiment, DirtyGitAction
-
-# Using the enum
-with experiment(workdir, "my-experiment", dirty_git=DirtyGitAction.ERROR) as xp:
-    ...
-
-# Or using the string value
-with experiment(workdir, "my-experiment", dirty_git=DirtyGitAction.WARN) as xp:
-    ...
-```
-
-#### Handling DirtyGitError
-
-When `dirty_git` is set to `error`, a {py:class}`~experimaestro.DirtyGitError` exception is raised if the repository has uncommitted changes:
-
-```python
-from experimaestro import experiment, DirtyGitAction, DirtyGitError
-
-try:
-    with experiment(workdir, "my-experiment", dirty_git=DirtyGitAction.ERROR) as xp:
-        ...
-except DirtyGitError as e:
-    print(f"Cannot run experiment: {e}")
-```
-
-### Common handling
-
-See {py:class}`~experimaestro.experiments.cli.ExperimentHelper` for the CLI helper class.
+Experiments can expose long-running services (a TensorBoard instance, a web
+application) that the monitoring interfaces start, stop, and display. See
+[Services](services.md).
 
 ## Experiment metadata
 
-### Hostname tracking
-
-Experimaestro automatically records the hostname where each experiment run is launched. This information is useful for identifying which machine was used when running experiments across multiple hosts.
-
-The hostname is:
-- Recorded when a new experiment run starts
-- Stored in both the workspace database and on disk (in `xp/{experiment_id}/informations.json`)
-- Displayed in the experiments list in both CLI and TUI
-- Preserved during database resync operations
-
-To view the hostname for experiments:
+Each run records the host it was launched from, in the workspace database and
+in `xp/{experiment_id}/informations.json`. It is preserved by database resyncs
+and displayed by the interfaces — useful when experiments of the same workspace
+are launched from several machines:
 
 ```bash
-# CLI - shows hostname in brackets
-experimaestro experiments --workdir /path/to/workdir list
-# Output: my-experiment [hostname.local] (5/10 jobs)
-
-# TUI - hostname shown in "Host" column
-experimaestro experiments --workdir /path/to/workdir monitor --console
+# Shown in brackets after the experiment ID
+experimaestro experiments --workdir /path/to/workspace list
+# my-experiment [hostname.local] (5/10 jobs)
 ```
-
-with workdir one of the directories defined in the [Settings](settings.md)

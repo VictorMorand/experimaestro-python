@@ -34,7 +34,7 @@ LOCK_MODE_ENV = "XPM_LOCK_MODE"
 
 #: Documentation pointer given when a lock file cannot be accessed
 SHARED_WORKSPACE_DOC = (
-    "https://experimaestro-python.readthedocs.io/en/latest/settings.html"
+    "https://experimaestro-python.readthedocs.io/en/latest/experiments.html"
     "#sharing-a-workspace"
 )
 

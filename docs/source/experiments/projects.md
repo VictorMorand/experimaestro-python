@@ -122,7 +122,7 @@ uv run experimaestro run-experiment my_project/normal
 
 `run-experiment` reads the YAML, builds the `Configuration` object (validating
 types), imports the module, and calls its `run(helper, cfg)` function. See the
-[experiment configuration reference](../experiments.md) for the full list of
+[CLI experiment runner](cli-runner.md) for the full list of
 YAML options (`id`, `file`/`module`, `pythonpath`, `imports`, `pre_experiment`,
 `dirty_git`, …) and the [CLI documentation](../cli.md#running-experiments) for
 the command-line flags (`--run-mode`, `-c`, `--pre-yaml`/`--post-yaml`,
@@ -241,6 +241,8 @@ for the full helper API.
 ## See also
 
 - [Tutorial](../tutorial.md) — a guided walk-through of the demo project.
-- [Running experiments](../experiments.md) — the YAML configuration reference.
+- [Running experiments](../experiments.md) — launching experiments, and the
+  practices that keep results reusable.
+- [The CLI experiment runner](cli-runner.md) — the YAML configuration reference.
 - [Experimental plan](plan.md) — composing and submitting tasks.
 - [Workspaces](workspace.md) & [Settings](../settings.md) — where outputs go.
